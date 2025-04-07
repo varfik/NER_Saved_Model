@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv  # Changed from GCNConv to GATConv
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, AutoConfig, BertConfig
 from torchcrf import CRF  # Added CRF layer
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler  # Added WeightedRandomSampler
 import networkx as nx
@@ -201,7 +201,6 @@ class NERRelationModel(nn.Module):
         # 2. Сохраняем конфигурацию модели в формате Hugging Face
         config = {
             "model_type": "bert",  # Указываем тип модели для Hugging Face
-            "architectures": ["NERRelationModel"],
             "model_name": self.bert.name_or_path,
             "num_ner_labels": self.num_ner_labels,
             "bert_config": self.bert.config.to_dict()
@@ -217,18 +216,19 @@ class NERRelationModel(nn.Module):
     def from_pretrained(cls, model_dir, device="cuda"):
         """Загружает модель из указанной директории."""
         # 1. Загружаем конфигурацию
-        with open(os.path.join(model_dir, "config.json"), "r") as f:
+        config_path = os.path.join(model_dir, "config.json")
+        with open(config_path, "r") as f:
             config = json.load(f)
         
         # 2. Инициализируем BERT с сохраненной конфигурацией
-        bert_config = BertConfig.from_dict(config["bert_config"])
+        bert_config = AutoConfig.from_dict(config["bert_config"])
         bert = AutoModel.from_config(bert_config)
         
         # 3. Создаем экземпляр модели
         model = cls(
             model_name=config["model_name"],
             num_ner_labels=config["num_ner_labels"]
-        ).to(device)
+        )
         
         # 4. Заменяем BERT на загруженную версию
         model.bert = bert.to(device)
@@ -715,9 +715,9 @@ if __name__ == "__main__":
 
     # Для загрузки модели
     loaded_model = NERRelationModel.from_pretrained("saved_model")
-    tokenizer = AutoTokenizer.from_pretrained("saved_model")
+    loaded_tokenizer = AutoTokenizer.from_pretrained("saved_model")
     
     # Использование модели
-    result = predict("По улице шел красивый человек, его имя было Мефодий. И был он счастлив. Работал этот чувак в яндексе, разработчиком. Или директором. Он пока не определился!", loaded_model, tokenizer)
+    result = predict("По улице шел красивый человек, его имя было Мефодий. И был он счастлив. Работал этот чувак в яндексе, разработчиком. Или директором. Он пока не определился!", loaded_model, loaded_tokenizer)
 
 
