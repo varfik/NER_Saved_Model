@@ -191,6 +191,51 @@ class NERRelationModel(nn.Module):
             return torch.cat(neg_probs).view(-1), torch.tensor(neg_targets, device=x.device)
         return torch.tensor([], device=x.device), torch.tensor([], device=x.device)
 
+    def save_pretrained(self, save_dir):
+        """Сохраняет модель, конфигурацию и токенизатор в указанную директорию."""
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # 1. Сохраняем веса модели
+        torch.save(self.state_dict(), os.path.join(save_dir, "model_weights.pt"))
+        
+        # 2. Сохраняем конфигурацию
+        config = {
+            "model_name": self.bert.name_or_path,
+            "num_ner_labels": self.num_ner_labels
+        }
+        with open(os.path.join(save_dir, "config.json"), "w") as f:
+            json.dump(config, f, indent=2)
+        
+        # 3. Сохраняем токенизатор (если он есть в модели)
+        if hasattr(self, 'tokenizer'):
+            self.tokenizer.save_pretrained(save_dir)
+
+        @classmethod
+    def from_pretrained(cls, model_dir, device="cuda"):
+        """Загружает модель из указанной директории."""
+        # 1. Загружаем конфигурацию
+        with open(os.path.join(model_dir, "config.json"), "r") as f:
+            config = json.load(f)
+        
+        # 2. Создаем экземпляр модели
+        model = cls(
+            model_name=config["model_name"],
+            num_ner_labels=config["num_ner_labels"]
+        ).to(device)
+        
+        # 3. Загружаем веса
+        model.load_state_dict(torch.load(
+            os.path.join(model_dir, "model_weights.pt"), 
+            map_location=device
+        ))
+        
+        # 4. Загружаем токенизатор (если нужно)
+        if os.path.exists(os.path.join(model_dir, "tokenizer_config.json")):
+            model.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        
+        model.eval()
+        return model
+
 
 # def visualize_relations(entities, relations, text):
 #     G = nx.DiGraph()
@@ -511,6 +556,10 @@ def train_model():
         print(f"Loss: {epoch_loss/len(train_loader):.4f}")
         print(f"NER Accuracy: {ner_acc:.2%} ({ner_correct}/{ner_total})")
         print(f"Relation Accuracy: {rel_acc:.2%} ({rel_correct}/{rel_total})")
+
+    save_dir = "saved_model"
+    model.save_pretrained(save_dir)
+    print(f"Model saved to {save_dir}")
     
     return model, tokenizer
 
@@ -658,3 +707,12 @@ if __name__ == "__main__":
         print("\nRelations:")
         for r in result['relations']:
             print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (conf: {r['confidence']:.2f})")
+
+    # Для загрузки модели
+    loaded_model = NERRelationModel.from_pretrained("saved_model")
+    tokenizer = AutoTokenizer.from_pretrained("saved_model")
+    
+    # Использование модели
+    result = predict("По улице шел красивый человек, его имя было Мефодий. И был он счастлив. Работал этот чувак в яндексе, разработчиком. Или директором. Он пока не определился!", loaded_model, tokenizer)
+
+
