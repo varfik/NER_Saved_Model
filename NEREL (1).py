@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv  # Changed from GCNConv to GATConv
-from transformers import AutoModel, AutoTokenizer, AutoConfig, BertConfig
+from transformers import AutoModel, AutoTokenizer
 from torchcrf import CRF  # Added CRF layer
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler  # Added WeightedRandomSampler
 import networkx as nx
@@ -191,56 +191,6 @@ class NERRelationModel(nn.Module):
             return torch.cat(neg_probs).view(-1), torch.tensor(neg_targets, device=x.device)
         return torch.tensor([], device=x.device), torch.tensor([], device=x.device)
 
-    def save_pretrained(self, save_dir, tokenizer=None):
-        """Сохраняет модель, конфигурацию и токенизатор в указанную директорию."""
-        os.makedirs(save_dir, exist_ok=True)
-        
-        # 1. Сохраняем веса модели
-        torch.save(self.state_dict(), os.path.join(save_dir, "pytorch_model.bin"))
-        
-        # 2. Сохраняем конфигурацию модели в формате Hugging Face
-        config = {
-            "model_type": "bert",  # Указываем тип модели для Hugging Face
-            "model_name": self.bert.name_or_path,
-            "num_ner_labels": self.num_ner_labels,
-            "bert_config": self.bert.config.to_dict()
-        }
-        with open(os.path.join(save_dir, "config.json"), "w") as f:
-            json.dump(config, f, indent=2)
-        
-        # 3. Сохраняем конфигурацию токенизатора
-        if tokenizer is not None:
-            tokenizer.save_pretrained(save_dir)
-    
-    @classmethod
-    def from_pretrained(cls, model_dir, device="cuda"):
-        """Загружает модель из указанной директории."""
-        # 1. Загружаем конфигурацию
-        config_path = os.path.join(model_dir, "config.json")
-        with open(config_path, "r") as f:
-            config = json.load(f)
-        
-        # 2. Инициализируем BERT с сохраненной конфигурацией
-        bert_config = BertConfig.from_dict(config["bert_config"])
-        bert = AutoModel.from_config(bert_config)
-        
-        # 3. Создаем экземпляр модели
-        model = cls(
-            model_name=config["model_name"],
-            num_ner_labels=config["num_ner_labels"]
-        ).to(device)
-        
-        # 4. Заменяем BERT на загруженную версию
-        model.bert = bert.to(device)
-        
-        # 5. Загружаем веса модели
-        model.load_state_dict(torch.load(
-            os.path.join(model_dir, "pytorch_model.bin"), 
-            map_location=device
-        ))
-        
-        model.eval()
-        return model
 
 # def visualize_relations(entities, relations, text):
 #     G = nx.DiGraph()
@@ -491,7 +441,7 @@ def train_model():
     # Training loop
     best_ner_f1 = 0
     # Цикл обучения
-    for epoch in range(1):
+    for epoch in range(3):
         model.train()
         epoch_loss = 0
         ner_correct = ner_total = 0
@@ -561,10 +511,6 @@ def train_model():
         print(f"Loss: {epoch_loss/len(train_loader):.4f}")
         print(f"NER Accuracy: {ner_acc:.2%} ({ner_correct}/{ner_total})")
         print(f"Relation Accuracy: {rel_acc:.2%} ({rel_correct}/{rel_total})")
-
-    save_dir = "saved_model"
-    model.save_pretrained(save_dir, tokenizer=tokenizer)
-    print(f"Model saved to {save_dir}")
     
     return model, tokenizer
 
@@ -712,12 +658,3 @@ if __name__ == "__main__":
         print("\nRelations:")
         for r in result['relations']:
             print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (conf: {r['confidence']:.2f})")
-
-    # Для загрузки модели
-    loaded_model = NERRelationModel.from_pretrained("saved_model")
-    loaded_tokenizer = AutoTokenizer.from_pretrained("saved_model")
-    
-    # Использование модели
-    result = predict("По улице шел красивый человек, его имя было Мефодий. И был он счастлив. Работал этот чувак в яндексе, разработчиком. Или директором. Он пока не определился!", loaded_model, loaded_tokenizer)
-
-
