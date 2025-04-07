@@ -221,14 +221,14 @@ class NERRelationModel(nn.Module):
             config = json.load(f)
         
         # 2. Инициализируем BERT с сохраненной конфигурацией
-        bert_config = AutoConfig.from_dict(config["bert_config"])
+        bert_config = BertConfig.from_dict(config["bert_config"])
         bert = AutoModel.from_config(bert_config)
         
         # 3. Создаем экземпляр модели
         model = cls(
             model_name=config["model_name"],
             num_ner_labels=config["num_ner_labels"]
-        )
+        ).to(device)
         
         # 4. Заменяем BERT на загруженную версию
         model.bert = bert.to(device)
