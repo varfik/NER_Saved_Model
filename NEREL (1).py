@@ -210,7 +210,7 @@ class NERRelationModel(nn.Module):
         if hasattr(self, 'tokenizer'):
             self.tokenizer.save_pretrained(save_dir)
 
-        @classmethod
+    @classmethod
     def from_pretrained(cls, model_dir, device="cuda"):
         """Загружает модель из указанной директории."""
         # 1. Загружаем конфигурацию
