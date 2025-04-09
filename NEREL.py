@@ -338,55 +338,50 @@ class NERELDataset(Dataset):
 
                     # Поддерживаемые типы сущностей
                     if entity_type in ['PERSON', 'PROFESSION', 'ORGANIZATION', 'FAMILY']:
-                        try:
-                            start = int(type_and_span[1])
-                            end = int(type_and_span[-1])
-                            entity_text = parts[2]
-                            
-                            # Verify entity span matches text
-                            if text[start:end] != entity_text:
-                                # Try to find correct span
-                                found_pos = text.find(entity_text)
-                                if found_pos != -1:
-                                    start = found_pos
-                                    end = found_pos + len(entity_text)
+                        start = int(type_and_span[1])
+                        end = int(type_and_span[-1])
+                        entity_text = parts[2]
                         
-                            entity = {
-                                'id': entity_id,
-                                'type': entity_type,
-                                'start': start,
-                                'end': end,
-                                'text': entity_text
-                            }
-                            entities.append(entity)
-                            entity_map[entity_id] = entity
+                        # Verify entity span matches text
+                        if text[start:end] != entity_text:
+                            # Try to find correct span
+                            found_pos = text.find(entity_text)
+                            if found_pos != -1:
+                                start = found_pos
+                                end = found_pos + len(entity_text)
+                    
+                        entity = {
+                            'id': entity_id,
+                            'type': entity_type,
+                            'start': start,
+                            'end': end,
+                            'text': entity_text
+                        }
+                        entities.append(entity)
+                        entity_map[entity_id] = entity
                 
                 elif line.startswith('R'):
                     parts = line.strip()split('\t')
                     if len(parts) < 2:
                         continue
                     
-                    try:
-                        rel_type = parts[1].split()[0]
-                        arg1 = parts[1].split()[1].split(':')[1]
-                        arg2 = parts[1].split()[2].split(':')[1]
-                    
-                        # Проверяем существование сущностей
-                        if arg1 not in entity_map or arg2 not in entity_map:
-                            continue
-                        
-                        e1_type = entity_map[arg1]['type']
-                        e2_type = entity_map[arg2]['type']
-                    
-                        if self._is_valid_pair(e1_type, e2_type, rel_type):
-                            relations.append({
-                                'type': rel_type,
-                                'arg1': arg1,
-                                'arg2': arg2
-                            })
-
-                    except (IndexError, KeyError):
+                    rel_type = parts[1].split()[0]
+                    arg1 = parts[1].split()[1].split(':')[1]
+                    arg2 = parts[1].split()[2].split(':')[1]
+                
+                    # Проверяем существование сущностей
+                    if arg1 not in entity_map or arg2 not in entity_map:
                         continue
+                    
+                    e1_type = entity_map[arg1]['type']
+                    e2_type = entity_map[arg2]['type']
+                
+                    if self._is_valid_pair(e1_type, e2_type, rel_type):
+                        relations.append({
+                            'type': rel_type,
+                            'arg1': arg1,
+                            'arg2': arg2
+                        })
     
         return entities, relations
     
@@ -832,5 +827,4 @@ if __name__ == "__main__":
     print("\nОтношения:")
     for r in result['relations']:
         print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (confidence: {r['confidence']:.2f})")
-
 
