@@ -591,7 +591,9 @@ def train_model():
             
             # Вычисление метрик для отношений
             if outputs['rel_probs'] is not None:
-                rel_preds = (torch.sigmoid(outputs['rel_probs']) > 0.5).long()
+                rel_preds = {}
+                for rel_type, probs in outputs['rel_probs'].items():
+                    rel_preds[rel_type] = (torch.sigmoid(probs) > 0.5).long()
                 # Собираем все предсказания и метки для батча
                 batch_rel_labels = []
                 
