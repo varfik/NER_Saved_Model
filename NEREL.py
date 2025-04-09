@@ -540,7 +540,7 @@ def train_model():
         {'params': model.crf.parameters(), 'lr': 1e-4},
         {'params': model.gat1.parameters(), 'lr': 1e-3},
         {'params': model.gat2.parameters(), 'lr': 1e-3},
-        {'params': model.rel_classifier.parameters(), 'lr': 1e-3}
+        {'params': model.rel_classifiers.parameters(), 'lr': 1e-3}
     ])
     
     # Training loop
