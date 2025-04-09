@@ -795,16 +795,17 @@ def extract_relations(outputs, model, encoding, entities, text, device, threshol
         encoding['input_ids'],
         encoding['attention_mask']
     ).last_hidden_state
-
-    # Create entity embeddings
+    
+    # Create entity embeddings with proper dimension handling
     entity_embeddings = []
     for e in entities:
-        # Ensure we don't go out of bounds
+        # Ensure we don't go out of bounds and handle empty spans
         start = min(e['start'], sequence_output.size(1)-1)
         end = min(e['end'], sequence_output.size(1)-1)
+        span_length = max(1, end - start + 1)
         entity_embed = sequence_output[0, start:end+1].mean(dim=0)
         entity_embeddings.append(entity_embed)
-      
+    
     if len(entity_embeddings) < 2:
         return []
         
@@ -821,18 +822,33 @@ def extract_relations(outputs, model, encoding, entities, text, device, threshol
     x = F.relu(x)
     x = model.gat2(x, edge_index)
     
-    # Predict relations
+    # Predict relations with proper feature concatenation
     relations = []
     for rel_type in ModelConfig.RELATION_TYPES:
         for i, e1 in enumerate(entities):
             for j, e2 in enumerate(entities):
                 if i != j and model._is_valid_pair(e1['type'], e2['type'], rel_type):
-                    pair_features = torch.cat([x[i], x[j]])
+                    # Ensure proper feature dimensions
+                    e1_features = x[i]
+                    e2_features = x[j]
+                    distance = torch.abs(torch.tensor(i - j, dtype=torch.float, device=device))
+                    distance_feature = torch.log(distance + 1).unsqueeze(0)
+                    
+                    # Correct feature concatenation
+                    pair_features = torch.cat([
+                        e1_features, 
+                        e2_features, 
+                        e1_features * e2_features,
+                        (e1_features + e2_features)/2,
+                        distance_feature
+                    ]).unsqueeze(0)  # Add batch dimension
+                    
+                    # Pass through feature extractor
+                    pair_features = model.rel_feature_extractor(pair_features)
                     logit = model.rel_classifiers[rel_type](pair_features)
                     prob = torch.sigmoid(logit).item()
                     
                     if prob > threshold:
-                        # For FOUNDED_BY we reverse the direction
                         if rel_type == 'FOUNDED_BY':
                             i, j = j, i
                         
