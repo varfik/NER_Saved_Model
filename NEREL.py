@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GATConv  # Changed from GCNConv to GATConv
+from torch_geometric.nn import GATConv
 from transformers import AutoModel, AutoTokenizer, AutoConfig, BertConfig
-from torchcrf import CRF  # Added CRF layer
+from torchcrf import CRF
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler  # Added WeightedRandomSampler
 import networkx as nx
 import matplotlib.pyplot as plt
