@@ -361,7 +361,7 @@ class NERELDataset(Dataset):
                         entity_map[entity_id] = entity
                 
                 elif line.startswith('R'):
-                    parts = line.strip()split('\t')
+                    parts = line.strip().split('\t')
                     if len(parts) < 2:
                         continue
                     
