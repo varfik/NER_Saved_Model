@@ -591,24 +591,30 @@ def train_model():
             
             # Вычисление метрик для отношений
             if outputs['rel_probs'] is not None:
-                rel_preds = {}
-                for rel_type, probs in outputs['rel_probs'].items():
-                    rel_preds[rel_type] = (torch.sigmoid(probs) > 0.5).long()
-                # Собираем все предсказания и метки для батча
-                batch_rel_labels = []
+                # Собираем все метки отношений
+                all_rel_labels = []
+                all_rel_preds = []
                 
                 for item in batch['rel_data']:
-                    if 'labels' in item and len(item['labels']) > 0:
-                        batch_rel_labels.extend(item['labels'])
+                    if len(item['labels']) > 0:
+                        all_rel_labels.extend(item['labels'])
                 
-                if batch_rel_labels:
-                    # Преобразуем в тензоры
-                    rel_labels = torch.tensor(batch_rel_labels, device=device)
+                if all_rel_labels:
+                    # Для каждого типа отношений собираем предсказания
+                    for rel_type, probs in outputs['rel_probs'].items():
+                        preds = (torch.sigmoid(probs) > 0.5).long()
+                        all_rel_preds.append(preds)
                     
-                    # Обрезаем или дополняем предсказания до размера меток
-                    min_len = min(len(rel_preds), len(rel_labels))
-                    rel_correct += (rel_preds[:min_len] == rel_labels[:min_len]).sum().item()
-                    rel_total += min_len
+                    if all_rel_preds:
+                        # Конкатенируем все предсказания
+                        all_rel_preds = torch.cat(all_rel_preds)
+                        rel_labels = torch.tensor(all_rel_labels, device=device)
+                        
+                        # Проверяем совпадение размеров
+                        min_len = min(len(all_rel_preds), len(rel_labels))
+                        if min_len > 0:
+                            rel_correct += (all_rel_preds[:min_len] == rel_labels[:min_len]).sum().item()
+                            rel_total += min_len
 
         # Evaluation metrics
         ner_acc = ner_correct / ner_total if ner_total > 0 else 0
@@ -696,7 +702,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
             }
             entity_id += 1
         elif pred == 6:  # I-ORG
-            if current_entity and current_entity['type'] == "OARGANIZATION":
+            if current_entity and current_entity['type'] == "ORGANIZATION":
                 current_entity['end'] = i
                 current_entity['token_ids'].append(i)
         elif pred == 7: # B-FAM
