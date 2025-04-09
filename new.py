@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv
-from transformers import AutoModel, AutoTokenizer, AutoConfig, BertConfig
+from transformers import AutoModel, AutoTokenizer, BertConfig
 from torchcrf import CRF
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import os
@@ -72,9 +72,9 @@ class NERRelationModel(nn.Module):
         self.gat1 = GATConv(self.bert.config.hidden_size, 128, heads=4, dropout=0.3)
         self.gat2 = GATConv(128*4, 64, heads=1, dropout=0.3)
         
-        # Улучшенный классификатор отношений
+        # Relation feature extractor
         self.rel_feature_extractor = nn.Sequential(
-            nn.Linear(self.bert.config.hidden_size * 4 + 1, 512),  # Используем в 3 раза больше признаков
+            nn.Linear(self.bert.config.hidden_size * 4 + 1, 512),
             nn.LayerNorm(512),
             nn.LeakyReLU(),
             nn.Dropout(0.4)
@@ -225,7 +225,6 @@ class NERRelationModel(nn.Module):
         current_probs = []
         current_targets = []
 
-        
         for (e1_id, e2_id), label in zip(sample['pairs'], sample['labels']):
             if e1_id not in entity_indices or e2_id not in entity_indices:
                 continue
@@ -233,24 +232,24 @@ class NERRelationModel(nn.Module):
             e1_idx = entity_indices[e1_id]
             e2_idx = entity_indices[e2_id]
                 
-            # Улучшенные признаки пары
+            # Pair features
             e1_features = x[e1_idx]
             e2_features = x[e2_idx]
             
-            # Расстояние между сущностями (важная особенность!)
+            # Distance feature
             distance = torch.abs(torch.tensor(e1_idx - e2_idx, dtype=torch.float, device=device))
             distance_feature = torch.log(distance + 1).unsqueeze(0)
             
-            # Комбинированные признаки
+            # Combined features
             pair_features = torch.cat([
                 e1_features, 
                 e2_features, 
-                e1_features * e2_features,  # Взаимодействие признаков
+                e1_features * e2_features,
                 (e1_features + e2_features)/2,
                 distance_feature
             ])
             
-            # Пропускаем через улучшенный экстрактор признаков
+            # Feature extraction
             pair_features = self.rel_feature_extractor(pair_features)
             
             current_probs.append(self.rel_classifiers[rel_type](pair_features))
@@ -318,8 +317,8 @@ class NERRelationModel(nn.Module):
             
             pair_features = self.rel_feature_extractor(pair_features)
             neg_probs.append(self.rel_classifiers[rel_type](pair_features))
+        
         if neg_probs:
-            # Объединяем все отрицательные примеры
             neg_probs_tensor = torch.cat([p.view(-1) for p in neg_probs])
             neg_labels_tensor = torch.zeros(len(neg_probs), dtype=torch.float, device=device)
             return neg_probs_tensor, neg_labels_tensor
@@ -553,10 +552,10 @@ class NERELDataset(Dataset):
                     'id': entity['id']
                 })
         
-        for rel_type, rel_list in sample['relations'].items():  # Идём по типам отношений
-            if rel_type not in ModelConfig.RELATION_TYPES:  # Пропускаем неизвестные типы
+        for rel_type, rel_list in sample['relations'].items():
+            if rel_type not in ModelConfig.RELATION_TYPES:
                 continue
-            for relation in rel_list:  # Идём по всем отношениям этого типа
+            for relation in rel_list:
                 arg1_idx = token_entity_id_to_idx.get(relation['arg1'], -1)
                 arg2_idx = token_entity_id_to_idx.get(relation['arg2'], -1)
                 
@@ -614,7 +613,7 @@ def train_model():
         {'params': model.rel_classifiers.parameters(), 'lr': 1e-3}
     ])
     
-    for epoch in range(1):
+    for epoch in range(10):  # Increased number of epochs
         model.train()
         epoch_loss = 0
         ner_correct = ner_total = 0
@@ -683,7 +682,7 @@ def calculate_metrics(outputs, batch, model, device):
             preds = (torch.sigmoid(probs) > 0.5).long()
             all_preds.append(preds)
             
-            # Собираем метки для этого типа отношений
+            # Get labels for this relation type
             rel_labels = []
             for item in batch['rel_data']:
                 if rel_type in [r['type'] for r in item.get('relations', [])]:
@@ -697,7 +696,6 @@ def calculate_metrics(outputs, batch, model, device):
             pred_labels = torch.cat(all_preds)
             metrics['rel_correct'] += (pred_labels == true_labels).sum().item()
             metrics['rel_total'] += len(true_labels)
-    
     
     return metrics
 
@@ -713,7 +711,7 @@ def print_epoch_results(epoch, epoch_loss, num_batches, ner_correct, ner_total, 
 def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
     encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, 
                         max_length=512, truncation=True)
-    encoding = {k: v.to(device) for k, v in encoding.items()}  # Переносим все на устройство
+    encoding = {k: v.to(device) for k, v in encoding.items()}
     with torch.no_grad():
         outputs = model(
             encoding['input_ids'].to(device),
