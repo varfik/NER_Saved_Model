@@ -512,7 +512,7 @@ def collate_fn(batch):
         'attention_mask': attention_mask,
         'ner_labels': ner_labels,
         'rel_data': rel_data,
-        'texts': [item['text'] for item in batch]  # Добавляем исходные тексты для отладки
+        'texts': [item['text'] for item in batch],  # Добавляем исходные тексты для отладки
         'offset_mapping': offset_mapping
     }
 
