@@ -666,7 +666,7 @@ def print_epoch_results(epoch, epoch_loss, num_batches, ner_correct, ner_total, 
 def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
     encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, 
                         max_length=512, truncation=True)
-    
+    encoding = {k: v.to(device) for k, v in encoding.items()}  # Переносим все на устройство
     with torch.no_grad():
         outputs = model(
             encoding['input_ids'].to(device),
@@ -683,7 +683,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
     }
 
 def extract_entities(outputs, encoding, tokenizer, text, model):
-    mask = encoding['attention_mask'].bool()
+    mask = encoding['attention_mask'].bool().to(outputs['ner_logits'].device) 
     ner_preds = model.crf.decode(outputs['ner_logits'], mask=mask)[0]
     tokens = tokenizer.convert_ids_to_tokens(encoding['input_ids'][0])
     offset_mapping = encoding['offset_mapping'][0].cpu().numpy()
@@ -747,8 +747,8 @@ def extract_relations(outputs, model, encoding, entities, text, device, threshol
         return []
     
     sequence_output = model.bert(
-        encoding['input_ids'].to(device),
-        encoding['attention_mask'].to(device)
+        encoding['input_ids'],
+        encoding['attention_mask']
     ).last_hidden_state
     
     # Create entity embeddings
