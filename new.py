@@ -305,7 +305,10 @@ class NERRelationModel(nn.Module):
             pair_features = self.rel_feature_extractor(pair_features)
             neg_probs.append(self.rel_classifiers[rel_type](pair_features))
         if neg_probs:
-            return torch.cat(neg_probs), torch.zeros(len(neg_probs), device=device)
+            # Объединяем все отрицательные примеры
+            neg_probs_tensor = torch.cat([p.view(-1) for p in neg_probs])
+            neg_labels_tensor = torch.zeros(len(neg_probs), dtype=torch.float, device=device)
+            return neg_probs_tensor, neg_labels_tensor
         return torch.tensor([], device=device), torch.tensor([], device=device)
 
     def save_pretrained(self, save_dir, tokenizer=None):
