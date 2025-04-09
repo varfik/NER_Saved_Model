@@ -488,6 +488,8 @@ def collate_fn(batch):
     ner_labels = torch.stack([item['ner_labels'] for item in batch])
     offset_mapping = torch.stack([item['offset_mapping'] for item in batch])
 
+    device = input_ids.device
+    
     rel_data = []
     # Собираем rel_data как список словарей
     for item in batch:
