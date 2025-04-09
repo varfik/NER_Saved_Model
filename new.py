@@ -229,9 +229,11 @@ class NERRelationModel(nn.Module):
         context_features = x.mean(dim=0)  # Общие признаки всего предложения
         
         for (e1_id, e2_id), label in zip(sample['pairs'], sample['labels']):
-            if e1_id in entity_indices and e2_id in entity_indices:
-                e1_idx = entity_indices[e1_id]
-                e2_idx = entity_indices[e2_id]
+            if e1_id not in entity_indices or e2_id not in entity_indices:
+                continue
+            
+            e1_idx = entity_indices[e1_id]
+            e2_idx = entity_indices[e2_id]
                 
             # Улучшенные признаки пары
             e1_features = x[e1_idx]
@@ -260,13 +262,27 @@ class NERRelationModel(nn.Module):
         neg_probs, neg_targets = self._generate_negative_examples(
             x, [e['type'] for e in sample['entities']], rel_type, device)
         
-        if current_probs or neg_probs.numel() > 0:
-            all_probs = torch.cat(current_probs + [neg_probs]) if current_probs else neg_probs
-            all_targets = torch.tensor(current_targets + neg_targets.tolist(), device=device) if current_targets else neg_targets
+        if current_probs:
+            pos_probs = torch.cat([p.view(-1) for p in current_probs])
+            pos_targets = torch.tensor(current_targets, dtype=torch.float, device=device)
+            
+            if neg_probs.numel() > 0:
+                all_probs = torch.cat([pos_probs, neg_probs])
+                all_targets = torch.cat([pos_targets, neg_targets])
+            else:
+                all_probs = pos_probs
+                all_targets = pos_targets
+            
             return {
-                'probs': all_probs.view(-1),
-                'targets': all_targets.float()
+                'probs': all_probs,
+                'targets': all_targets
             }
+        elif neg_probs.numel() > 0:
+            return {
+                'probs': neg_probs,
+                'targets': neg_targets
+            }
+
         return None
 
     def _is_valid_pair(self, e1_type, e2_type, rel_type):
@@ -309,6 +325,7 @@ class NERRelationModel(nn.Module):
             neg_probs_tensor = torch.cat([p.view(-1) for p in neg_probs])
             neg_labels_tensor = torch.zeros(len(neg_probs), dtype=torch.float, device=device)
             return neg_probs_tensor, neg_labels_tensor
+
         return torch.tensor([], device=device), torch.tensor([], device=device)
 
     def save_pretrained(self, save_dir, tokenizer=None):
@@ -661,20 +678,27 @@ def calculate_metrics(outputs, batch, model, device):
     
     # Relation metrics
     if 'rel_probs' in outputs and outputs['rel_probs']:
+        all_preds = []
+        all_labels = []
+        
         for rel_type, probs in outputs['rel_probs'].items():
             preds = (torch.sigmoid(probs) > 0.5).long()
+            all_preds.append(preds)
             
-            # Собираем все метки для этого типа отношения
+            # Собираем метки для этого типа отношений
             rel_labels = []
             for item in batch['rel_data']:
-                if 'pairs' in item and item['pairs']:
-                    # Предполагаем, что все пары в batch для этого rel_type
-                    rel_labels.extend(item['labels'])
+                if rel_type in [r['type'] for r in item.get('relations', [])]:
+                    rel_labels.extend([1] * len(item['pairs']))
             
-            if len(rel_labels) > 0:
-                true_labels = torch.tensor(rel_labels[:len(preds)], device=device)
-                metrics['rel_correct'] += (preds == true_labels).sum().item()
-                metrics['rel_total'] += len(true_labels)
+            if rel_labels:
+                all_labels.extend(rel_labels[:len(preds)])
+        
+        if all_labels and all_preds:
+            true_labels = torch.tensor(all_labels[:len(torch.cat(all_preds))], device=device)
+            pred_labels = torch.cat(all_preds)
+            metrics['rel_correct'] += (pred_labels == true_labels).sum().item()
+            metrics['rel_total'] += len(true_labels)
     
     
     return metrics
