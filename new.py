@@ -795,12 +795,20 @@ def extract_relations(outputs, model, encoding, entities, text, device, threshol
         encoding['input_ids'],
         encoding['attention_mask']
     ).last_hidden_state
-    
+
     # Create entity embeddings
-    entity_embeddings = torch.stack([
-        sequence_output[0, e['start']:e['end']+1].mean(dim=0) 
-        for e in entities
-    ]).to(device)   
+    entity_embeddings = []
+    for e in entities:
+        # Ensure we don't go out of bounds
+        start = min(e['start'], sequence_output.size(1)-1)
+        end = min(e['end'], sequence_output.size(1)-1)
+        entity_embed = sequence_output[0, start:end+1].mean(dim=0)
+        entity_embeddings.append(entity_embed)
+      
+    if len(entity_embeddings) < 2:
+        return []
+        
+    entity_embeddings = torch.stack(entity_embeddings).to(device)
     
     # Build complete graph
     edge_index = torch.tensor([
