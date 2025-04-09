@@ -142,7 +142,7 @@ class NERRelationModel(nn.Module):
                         continue
             
                     edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous().to(device)
-                    x = torch.stack(entity_embeddings)
+                    x = torch.stack(entity_embeddings).to(device)
                 
                     # Применяем GAT
                     x = self.gat1(x, edge_index)
@@ -227,7 +227,7 @@ class NERRelationModel(nn.Module):
                     possible_pairs.append((i, j))
         
         if not possible_pairs:
-            return torch.tensor([], device=entity_embeddings.device), torch.tensor([], device=entity_embeddings.device)
+            return torch.tensor([], device=device), torch.tensor([], device=device)
         
         # Выбираем случайное подмножество пар в качестве отрицательных примеров
         num_neg = max(1, int(len(possible_pairs) * ratio))
@@ -240,7 +240,7 @@ class NERRelationModel(nn.Module):
         
         if neg_probs:
             return torch.cat(neg_probs).view(-1), torch.tensor(neg_targets, device=device)
-        return torch.tensor([], device=entity_embeddings.device), torch.tensor([], device=device)
+        return torch.tensor([], device=device), torch.tensor([], device=device)
 
     def save_pretrained(self, save_dir, tokenizer=None):
         """Сохраняет модель, конфигурацию и токенизатор в указанную директорию."""
@@ -493,17 +493,9 @@ def collate_fn(batch):
     for item in batch:
         rel_entry = {
             'entities': item['rel_data']['entities'],
-            'pairs': [],
-            'labels': []
+            'pairs': item['rel_data']['pairs'],
+            'labels': torch.tensor(item['rel_data']['labels'], dtype=torch.long).to(device)  # Добавляем .to(device)
         }
-        
-        # Convert relation labels to tensor
-        if item['rel_data']['labels']:
-            rel_entry['pairs'] = item['rel_data']['pairs']
-            rel_entry['labels'] = torch.tensor(item['rel_data']['labels'], dtype=torch.long)
-        else:
-            rel_entry['labels'] = torch.tensor([], dtype=torch.long)
-            
         rel_data.append(rel_entry)
     
     return {
@@ -634,7 +626,7 @@ def train_model():
 
 def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
     # Tokenize input with offset mapping
-    encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, max_length=512, truncation=True)
+    encoding = tokenizer(text, return_tensors="pt")
     
     input_ids = encoding['input_ids'].to(device)
     attention_mask = encoding['attention_mask'].to(device)
