@@ -647,7 +647,6 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
     entities = []
     current_entity = None
     entity_id = 0
-    entity_map = {}
     
     for i, (token, pred) in enumerate(zip(tokens, ner_preds)):
         if token in ['[CLS]', '[SEP]', '[PAD]']:
@@ -731,10 +730,10 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
         entity['text'] = text[start_char:end_char]
         entity['start_char'] = start_char
         entity['end_char'] = end_char
-        entity_map[entity['id']] = entity
 
     # Extract relations
     relations = []
+    entity_map = {e['id']: e for e in entities}
     if len(entities) >= 2:
         sequence_output = model.bert(input_ids, attention_mask).last_hidden_state
 
