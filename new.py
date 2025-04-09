@@ -352,7 +352,7 @@ class NERELDataset(Dataset):
         return samples
     
     def _parse_ann_file(self, ann_path, text):
-        entities, relations = [], {}
+        entities, relations = [], defaultdict(list)
         entity_map = {}
         
         with open(ann_path, 'r', encoding='utf-8') as f:
@@ -370,7 +370,7 @@ class NERELDataset(Dataset):
                 elif line.startswith('R'):
                     relation = self._parse_relation_line(line, entity_map)
                     if relation:
-                        relations.setdefault(relation['type'], []).append(relation)
+                        relations.[relation['type']].append(relation)
         
         return entities, relations
 
@@ -508,14 +508,15 @@ class NERELDataset(Dataset):
                     'id': entity['id']
                 })
         
-        for relation in sample['relations']:
-            arg1_idx = token_entity_id_to_idx.get(relation['arg1'], -1)
-            arg2_idx = token_entity_id_to_idx.get(relation['arg2'], -1)
+        for rel_type, rel_list in sample['relations'].items():  # Идём по типам отношений
+            for relation in rel_list:  # Идём по всем отношениям этого типа
+                arg1_idx = token_entity_id_to_idx.get(relation['arg1'], -1)
+                arg2_idx = token_entity_id_to_idx.get(relation['arg2'], -1)
+                
+                if arg1_idx != -1 and arg2_idx != -1:
+                    rel_data['pairs'].append((arg1_idx, arg2_idx))
+                    rel_data['labels'].append(ModelConfig.RELATION_TYPES[rel_type])
             
-            if arg1_idx != -1 and arg2_idx != -1:
-                rel_data['pairs'].append((arg1_idx, arg2_idx))
-                rel_data['labels'].append(ModelConfig.RELATION_TYPES[relation['type']])
-        
         return rel_data
 
 def collate_fn(batch):
