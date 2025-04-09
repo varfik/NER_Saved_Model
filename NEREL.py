@@ -215,6 +215,7 @@ class NERRelationModel(nn.Module):
         return (e1_type, e2_type) in relation_rules.get(rel_type, [])
 
     def _generate_negative_examples(self, entity_embeddings, entity_types, rel_type, ratio=0.5):
+        device = entity_embeddings.device
         neg_probs = []
         neg_targets = []
         
@@ -238,8 +239,8 @@ class NERRelationModel(nn.Module):
             neg_targets.append(0.0)
         
         if neg_probs:
-            return torch.cat(neg_probs).view(-1), torch.tensor(neg_targets, device=entity_embeddings.device)
-        return torch.tensor([], device=entity_embeddings.device), torch.tensor([], device=entity_embeddings.device)
+            return torch.cat(neg_probs).view(-1), torch.tensor(neg_targets, device=device)
+        return torch.tensor([], device=entity_embeddings.device), torch.tensor([], device=device)
 
     def save_pretrained(self, save_dir, tokenizer=None):
         """Сохраняет модель, конфигурацию и токенизатор в указанную директорию."""
