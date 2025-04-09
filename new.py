@@ -509,6 +509,8 @@ class NERELDataset(Dataset):
                 })
         
         for rel_type, rel_list in sample['relations'].items():  # Идём по типам отношений
+            if rel_type not in ModelConfig.RELATION_TYPES:  # Пропускаем неизвестные типы
+                continue
             for relation in rel_list:  # Идём по всем отношениям этого типа
                 arg1_idx = token_entity_id_to_idx.get(relation['arg1'], -1)
                 arg2_idx = token_entity_id_to_idx.get(relation['arg2'], -1)
