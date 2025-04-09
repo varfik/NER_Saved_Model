@@ -370,7 +370,7 @@ class NERELDataset(Dataset):
                 elif line.startswith('R'):
                     relation = self._parse_relation_line(line, entity_map)
                     if relation:
-                        relations.[relation['type']].append(relation)
+                        relations[relation['type']].append(relation)
         
         return entities, relations
 
