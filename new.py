@@ -74,7 +74,7 @@ class NERRelationModel(nn.Module):
         
         # Улучшенный классификатор отношений
         self.rel_feature_extractor = nn.Sequential(
-            nn.Linear(self.bert.config.hidden_size * 3, 512),  # Используем в 3 раза больше признаков
+            nn.Linear(self.bert.config.hidden_size * 4 + 1, 512),  # Используем в 3 раза больше признаков
             nn.LayerNorm(512),
             nn.LeakyReLU(),
             nn.Dropout(0.4)
@@ -225,8 +225,6 @@ class NERRelationModel(nn.Module):
         current_probs = []
         current_targets = []
 
-        # Добавляем контекстные признаки
-        context_features = x.mean(dim=0)  # Общие признаки всего предложения
         
         for (e1_id, e2_id), label in zip(sample['pairs'], sample['labels']):
             if e1_id not in entity_indices or e2_id not in entity_indices:
@@ -248,7 +246,7 @@ class NERRelationModel(nn.Module):
                 e1_features, 
                 e2_features, 
                 e1_features * e2_features,  # Взаимодействие признаков
-                context_features,
+                (e1_features + e2_features)/2,
                 distance_feature
             ])
             
@@ -314,7 +312,7 @@ class NERRelationModel(nn.Module):
                 e1_features, 
                 e2_features, 
                 e1_features * e2_features,
-                entity_embeddings.mean(dim=0),
+                (e1_features + e2_features)/2,
                 distance_feature
             ])
             
