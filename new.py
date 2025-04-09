@@ -72,22 +72,25 @@ class NERRelationModel(nn.Module):
         self.gat1 = GATConv(self.bert.config.hidden_size, 128, heads=4, dropout=0.3)
         self.gat2 = GATConv(128*4, 64, heads=1, dropout=0.3)
         
+        # Улучшенный классификатор отношений
+        self.rel_feature_extractor = nn.Sequential(
+            nn.Linear(self.bert.config.hidden_size * 3, 512),  # Используем в 3 раза больше признаков
+            nn.LayerNorm(512),
+            nn.LeakyReLU(),
+            nn.Dropout(0.4)
+        )
+
         # Relation classifiers
         self.rel_classifiers = nn.ModuleDict({
-            rel_type: self._build_relation_classifier() 
-            for rel_type in self.config.RELATION_TYPES
+            rel_type: nn.Sequential(
+                nn.Linear(512, 256),
+                nn.LayerNorm(256),
+                nn.LeakyReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(256, 1)
+            ) for rel_type in self.config.RELATION_TYPES
         })
-
         self._init_weights()
-
-    def _build_relation_classifier(self):
-        return nn.Sequential(
-            nn.Linear(64 * 2, 256),
-            nn.LayerNorm(256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 1)
-        )
 
     def _init_weights(self):
         for module in [self.ner_classifier, *self.rel_classifiers.values()]:
@@ -221,35 +224,49 @@ class NERRelationModel(nn.Module):
     def _process_relation_pairs(self, x, sample, entity_indices, rel_type, device):
         current_probs = []
         current_targets = []
+
+        # Добавляем контекстные признаки
+        context_features = x.mean(dim=0)  # Общие признаки всего предложения
         
         for (e1_id, e2_id), label in zip(sample['pairs'], sample['labels']):
             if e1_id in entity_indices and e2_id in entity_indices:
                 e1_idx = entity_indices[e1_id]
                 e2_idx = entity_indices[e2_id]
-                e1_type = sample['entities'][e1_idx]['type']
-                e2_type = sample['entities'][e2_idx]['type']
-
-                if self._is_valid_pair(e1_type, e2_type, rel_type):
-                    pair_features = torch.cat([x[e1_idx], x[e2_idx]])
-                    current_probs.append(self.rel_classifiers[rel_type](pair_features))
-                    current_targets.append(label)
+                
+            # Улучшенные признаки пары
+            e1_features = x[e1_idx]
+            e2_features = x[e2_idx]
+            
+            # Расстояние между сущностями (важная особенность!)
+            distance = torch.abs(torch.tensor(e1_idx - e2_idx, dtype=torch.float, device=device))
+            distance_feature = torch.log(distance + 1).unsqueeze(0)
+            
+            # Комбинированные признаки
+            pair_features = torch.cat([
+                e1_features, 
+                e2_features, 
+                e1_features * e2_features,  # Взаимодействие признаков
+                context_features,
+                distance_feature
+            ])
+            
+            # Пропускаем через улучшенный экстрактор признаков
+            pair_features = self.rel_feature_extractor(pair_features)
+            
+            current_probs.append(self.rel_classifiers[rel_type](pair_features))
+            current_targets.append(1.0)
         
         # Add negative examples
-        if current_probs:
-            pos_probs = torch.cat(current_probs).view(-1)
-            pos_targets = torch.tensor(current_targets, dtype=torch.float, device=device)
-
-            neg_probs, neg_targets = self._generate_negative_examples(
-                x, [e['type'] for e in sample['entities']], rel_type, device)
-            
-            if len(neg_probs) > 0:
-                all_probs = torch.cat([pos_probs, neg_probs])
-                all_targets = torch.cat([pos_targets, neg_targets])
-            else:
-                all_probs = pos_probs
-                all_targets = pos_targets
-            
-            return {'probs': all_probs, 'targets': all_targets}
+        neg_probs, neg_targets = self._generate_negative_examples(
+            x, [e['type'] for e in sample['entities']], rel_type, device)
+        
+        if current_probs or neg_probs.numel() > 0:
+            all_probs = torch.cat(current_probs + [neg_probs]) if current_probs else neg_probs
+            all_targets = torch.tensor(current_targets + neg_targets.tolist(), device=device) if current_targets else neg_targets
+            return {
+                'probs': all_probs.view(-1),
+                'targets': all_targets.float()
+            }
         return None
 
     def _is_valid_pair(self, e1_type, e2_type, rel_type):
@@ -271,14 +288,24 @@ class NERRelationModel(nn.Module):
         sampled_pairs = random.sample(possible_pairs, min(num_neg, len(possible_pairs)))
 
         neg_probs = []
-        neg_targets = []
         for i, j in sampled_pairs:
-            pair_features = torch.cat([entity_embeddings[i], entity_embeddings[j]])
+            e1_features = entity_embeddings[i]
+            e2_features = entity_embeddings[j]
+            distance = torch.abs(torch.tensor(i - j, dtype=torch.float, device=device))
+            distance_feature = torch.log(distance + 1).unsqueeze(0)
+            
+            pair_features = torch.cat([
+                e1_features, 
+                e2_features, 
+                e1_features * e2_features,
+                entity_embeddings.mean(dim=0),
+                distance_feature
+            ])
+            
+            pair_features = self.rel_feature_extractor(pair_features)
             neg_probs.append(self.rel_classifiers[rel_type](pair_features))
-            neg_targets.append(0.0)
-        
         if neg_probs:
-            return torch.cat(neg_probs).view(-1), torch.tensor(neg_targets, device=device)
+            return torch.cat(neg_probs), torch.zeros(len(neg_probs), device=device)
         return torch.tensor([], device=device), torch.tensor([], device=device)
 
     def save_pretrained(self, save_dir, tokenizer=None):
@@ -517,7 +544,7 @@ class NERELDataset(Dataset):
                 
                 if arg1_idx != -1 and arg2_idx != -1:
                     rel_data['pairs'].append((arg1_idx, arg2_idx))
-                    rel_data['labels'].append(ModelConfig.RELATION_TYPES[rel_type])
+                    rel_data['labels'].append(1)
             
         return rel_data
 
@@ -630,27 +657,22 @@ def calculate_metrics(outputs, batch, model, device):
             metrics['ner_total'] += seq_len
     
     # Relation metrics
-    if outputs['rel_probs']:
-        all_rel_labels = []
-        all_rel_preds = []
-        
-        for item in batch['rel_data']:
-            if len(item['labels']) > 0:
-                all_rel_labels.extend(item['labels'])
-        
-        if all_rel_labels:
-            for rel_type, probs in outputs['rel_probs'].items():
-                preds = (torch.sigmoid(probs) > 0.5).long()
-                all_rel_preds.append(preds)
+    if 'rel_probs' in outputs and outputs['rel_probs']:
+        for rel_type, probs in outputs['rel_probs'].items():
+            preds = (torch.sigmoid(probs) > 0.5).long()
             
-            if all_rel_preds:
-                all_rel_preds = torch.cat(all_rel_preds)
-                rel_labels = torch.tensor(all_rel_labels, device=device)
-                
-                min_len = min(len(all_rel_preds), len(rel_labels))
-                if min_len > 0:
-                    metrics['rel_correct'] += (all_rel_preds[:min_len] == rel_labels[:min_len]).sum().item()
-                    metrics['rel_total'] += min_len
+            # Собираем все метки для этого типа отношения
+            rel_labels = []
+            for item in batch['rel_data']:
+                if 'pairs' in item and item['pairs']:
+                    # Предполагаем, что все пары в batch для этого rel_type
+                    rel_labels.extend(item['labels'])
+            
+            if len(rel_labels) > 0:
+                true_labels = torch.tensor(rel_labels[:len(preds)], device=device)
+                metrics['rel_correct'] += (preds == true_labels).sum().item()
+                metrics['rel_total'] += len(true_labels)
+    
     
     return metrics
 
