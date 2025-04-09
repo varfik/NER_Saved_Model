@@ -16,11 +16,28 @@ from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
+ENTITY_TYPES = {
+    'PERSON': 1,
+    'PROFESSION': 2,
+    'ORGANIZATION': 3,
+    'FAMILY': 4
+}
+
+RELATION_TYPES = {
+    'WORKS_AS': 1,
+    'MEMBER_OF': 2,
+    'FOUNDED_BY': 3,
+    'SPOUSE': 4,
+    'PARENT_OF': 5,
+    'SIBLING': 6
+
+}
+
 class NERRelationModel(nn.Module):
-    def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=6):
+    def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=9, num_rel_labels=7):
         super().__init__()
-        self.num_ner_labels = num_ner_labels
-        self.num_rel_labels = 1  # Только WORKS_AS (бинарная классификация)
+        self.num_ner_labels = num_ner_labels # O, B-PER, I-PER, B-PROF, I-PROF, B-ORG, I-ORG, B-FAM, I-FAM
+        self.num_rel_labels = num_rel_labels
         
         # BERT encoder
         self.bert = AutoModel.from_pretrained(model_name)
@@ -38,20 +55,31 @@ class NERRelationModel(nn.Module):
         self.gat1 = GATConv(self.bert.config.hidden_size, 128, heads=4, dropout=0.3)
         self.gat2 = GATConv(128*4, 64, heads=1, dropout=0.3)
         # Concatenate heads from first layer
-        
-        # Relation classifier (только для WORKS_AS)
-        self.rel_classifier = nn.Sequential(
-            nn.Linear(64 * 2, 256),  # Конкатенированные эмбеддинги
+    
+        # Relation classifiers
+        self.rel_classifiers = nn.ModuleDict({
+            'WORKS_AS': self._build_relation_classifier(),
+            'MEMBER_OF': self._build_relation_classifier(),
+            'FOUNDED_BY': self._build_relation_classifier(),
+            'SPOUSE': self._build_relation_classifier(),
+            'PARENT_OF': self._build_relation_classifier(),
+            'SIBLING': self._build_relation_classifier()
+        })
+
+        # Инициализация весов
+        self._init_weights()
+
+    def _build_relation_classifier(self):
+        return nn.Sequential(
+            nn.Linear(64 * 2, 256),
             nn.LayerNorm(256),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(256, 1)       # Бинарный классификатор 
+            nn.Linear(256, 1)
         )
-        # Инициализация весов
-        self._init_weights()
-    
+
     def _init_weights(self):
-        for module in [self.ner_classifier, self.rel_classifier]:
+        for module in [self.ner_classifier, *self.rel_classifiers.values()]:
             if isinstance(module, nn.Sequential):
                 for submodule in module:
                     if isinstance(submodule, nn.Linear):
@@ -69,103 +97,105 @@ class NERRelationModel(nn.Module):
         
         # NER loss
         if ner_labels is not None:
-             # Mask for CRF (0 for padding, 1 for real tokens)
+            # Mask for CRF (0 for padding, 1 for real tokens)
             mask = attention_mask.bool()
             ner_loss = -self.crf(ner_logits, ner_labels, mask=mask, reduction='mean')
             total_loss += ner_loss
 
         # Relation extraction
-        rel_probs = None
+        rel_probs = {}
         if rel_data:
-            batch_rel_probs = []
-            rel_targets = []
+            for rel_type in RELATION_TYPES:
+                batch_rel_probs = []
+                rel_targets = []
             
-            for batch_idx, sample in enumerate(rel_data):
-                if not sample.get('pairs', []):
-                    continue
+                for batch_idx, sample in enumerate(rel_data):
+                    if not sample.get('pairs', []):
+                        continue
                     
-                # Фильтрация сущностей
-                valid_entities = [
-                    e for e in sample['entities'] 
-                    if e['start'] <= e['end'] and 
-                    e['type'] in ['PERSON', 'PROFESSION']
-                ]
+                    # Фильтрация сущностей
+                    valid_entities = [
+                        e for e in sample['entities'] 
+                        if e['start'] <= e['end'] and 
+                        e['type'] in ['PERSON', 'PROFESSION', 'ORGANIZATION', 'FAMILY']
+                    ]
                 
-                if len(valid_entities) < 2:
-                    continue
+                    if len(valid_entities) < 2:
+                        continue
                 
-                # Создаем эмбеддинги сущностей
-                entity_embeddings = []
-                for e in valid_entities:
-                    start = min(e['start'], sequence_output.size(1)-1)
-                    end = min(e['end'], sequence_output.size(1)-1)
-                    entity_embed = sequence_output[batch_idx, start:end+1].mean(dim=0)
-                    entity_embeddings.append(entity_embed)
+                    # Создаем эмбеддинги сущностей
+                    entity_embeddings = []
+                    for e in valid_entities:
+                        start = min(e['start'], sequence_output.size(1)-1)
+                        end = min(e['end'], sequence_output.size(1)-1)
+                        entity_embed = sequence_output[batch_idx, start:end+1].mean(dim=0)
+                        entity_embeddings.append(entity_embed)
                 
-                # Строим граф только для PERSON и PROFESSION
-                person_indices = [i for i, e in enumerate(valid_entities) if e['type'] == 'PERSON']
-                prof_indices = [i for i, e in enumerate(valid_entities) if e['type'] == 'PROFESSION']
+                     # Build graph
+                    edge_index = []
+                    for i, e1 in enumerate(valid_entities):
+                        for j, e2 in enumerate(valid_entities):
+                            if i != j and self._is_valid_relation_pair(e1['type'], e2['type'], rel_type):
+                                edge_index.append([i, j])
+                    
+                    if not edge_index:
+                        continue
+            
+                    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous().to(device)
+                    x = torch.stack(entity_embeddings)
                 
-                # Создаем ребра только от PERSON к PROFESSION
-                edge_index = []
-                for p_idx in person_indices:
-                    for prof_idx in prof_indices:
-                        edge_index.append([p_idx, prof_idx])
+                    # Применяем GAT
+                    x = self.gat1(x, edge_index)
+                    x = F.relu(x)
+                    x = F.dropout(x, p=0.3, training=self.training)
+                    x = self.gat2(x, edge_index)
                 
-                if not edge_index:
-                    continue
+                    # Классифицируем отношения
+                    current_probs = []
+                    current_targets = []
+                    entity_indices = {e['id']: i for i, e in enumerate(valid_entities)}
                 
-                edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous().to(input_ids.device)
-                x = torch.stack(entity_embeddings)
+                    for (e1_id, e2_id), label in zip(sample['pairs'], sample['labels']):
+                        # Учитываем только PERSON->PROFESSION и только WORKS_AS
+                        if e1_id in entity_indices and e2_id in entity_indices:
+                            e1_idx = entity_indices[e1_id]
+                            e2_idx = entity_indices[e2_id]
+                            e1_type = valid_entities[e1_idx]['type']
+                            e2_type = valid_entities[e2_idx]['type']
                 
-                # Применяем GAT
-                x = self.gat1(x, edge_index)
-                x = F.relu(x)
-                x = F.dropout(x, p=0.3, training=self.training)
-                x = self.gat2(x, edge_index)
-                
-                # Классифицируем отношения
-                current_probs = []
-                current_targets = []
-                
-                for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
-                    # Учитываем только PERSON->PROFESSION и только WORKS_AS
-                    if (e1_idx < len(valid_entities) and e2_idx < len(valid_entities)):
-                        pair_features = torch.cat([x[e1_idx], x[e2_idx]])
-                        current_probs.append(self.rel_classifier(pair_features))
-                        current_targets.append(label)
-                
-                if current_probs:
-                    batch_rel_probs.append(torch.cat(current_probs).view(-1))  # Ensure flattened
-                    rel_targets.extend(current_targets)
+                            if self._is_valid_relation_pair(e1_type, e2_type, rel_type):
+                                pair_features = torch.cat([x[e1_idx], x[e2_idx]])
+                                current_probs.append(self.rel_classifiers[rel_type](pair_features))
+                                current_targets.append(label)
+                    
+                    # Add negative examples
+                    if current_probs:
+                        pos_probs = torch.cat(current_probs).view(-1)
+                        pos_targets = torch.tensor(current_targets, dtype=torch.float, device=device)
 
-            if batch_rel_probs and rel_targets:
-                rel_probs = torch.cat(batch_rel_probs)
-                rel_targets = torch.tensor(rel_targets, dtype=torch.float, device=device)
-
-                # # Проверка размеров
-                # if rel_probs.size(0) != rel_targets.size(0):
-                #     min_len = min(rel_probs.size(0), rel_targets.size(0))
-                #     rel_probs = rel_probs[:min_len]
-                #     rel_targets = rel_targets[:min_len]
-                
-                # Add dynamic negative sampling
-                if torch.all(rel_targets == 1):
-                    neg_probs, neg_targets = self._generate_negative_examples(x, person_indices, prof_indices)
-                    if len(neg_probs) > 0:
-                        rel_probs = torch.cat([rel_probs, neg_probs])
-                        rel_targets = torch.cat([rel_targets, neg_targets])
+                        # Generate negative examples
+                        neg_probs, neg_targets = self._generate_negative_examples(
+                            x, [e['type'] for e in valid_entities], rel_type)
                         
-                # Calculate relation loss with class weighting
-                pos_weight = torch.tensor([max(1.0, len(rel_targets)/sum(rel_targets))], device=device)
-                rel_loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-                rel_loss = rel_loss_fn(rel_probs, rel_targets)
-                total_loss += rel_loss
+                        if len(neg_probs) > 0:
+                            all_probs = torch.cat([pos_probs, neg_probs])
+                            all_targets = torch.cat([pos_targets, neg_targets])
+                        else:
+                            all_probs = pos_probs
+                            all_targets = pos_targets
+                        
+                        batch_rel_probs.append(all_probs)
+                        batch_rel_targets.append(all_targets)
 
-                # print(f"Relation probs shape: {rel_probs.shape}, Targets shape: {rel_targets.shape}")
-                # print(f"Sample predictions: {rel_probs[:5].tolist()}, Sample targets: {rel_targets[:5].tolist()}")
-                # print(f"Relation targets: {rel_targets[:10]}")
-                # print(f"Relation probs before sigmoid: {torch.logit(rel_probs[:10])}")
+                if batch_rel_probs:
+                    rel_probs[rel_type] = torch.cat(batch_rel_probs)
+                    rel_targets = torch.cat(batch_rel_targets)
+                    
+                    # Calculate loss with class weighting
+                    pos_weight = torch.tensor([2.0], device=device)  # Примерное взвешивание
+                    rel_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(
+                        rel_probs[rel_type], rel_targets)
+                    total_loss += rel_loss
 
         return {
             'ner_logits': ner_logits,
@@ -173,23 +203,43 @@ class NERRelationModel(nn.Module):
             'loss': total_loss if total_loss != 0 else None
         }
 
-    def _generate_negative_examples(self, x, person_indices, prof_indices, ratio=0.5):
+    def _is_valid_pair(self, e1_type, e2_type, rel_type):
+        relation_rules = {
+            'WORKS_AS': [('PERSON', 'PROFESSION')],
+            'MEMBER_OF': [('PERSON', 'ORGANIZATION')],
+            'FOUNDED_BY': [('ORGANIZATION', 'PERSON')],
+            'SPOUSE': [('PERSON', 'PERSON')],
+            'PARENT_OF': [('PERSON', 'PERSON'), ('PERSON', 'FAMILY')],
+            'SIBLING': [('PERSON', 'PERSON')]
+        }
+        return (e1_type, e2_type) in relation_rules.get(rel_type, [])
+
+    def _generate_negative_examples(self, entity_embeddings, entity_types, rel_type, ratio=0.5):
         neg_probs = []
         neg_targets = []
         
-        num_neg = int(len(person_indices) * len(prof_indices) * ratio)
+        # Собираем все возможные валидные пары для этого типа отношения
+        possible_pairs = []
+        for i, e1_type in enumerate(entity_types):
+            for j, e2_type in enumerate(entity_types):
+                if i != j and self._is_valid_pair(e1_type, e2_type, rel_type):
+                    possible_pairs.append((i, j))
         
-        for _ in range(num_neg):
-            p_idx = random.choice(person_indices)
-            prof_idx = random.choice(prof_indices)
-            
-            pair_features = torch.cat([x[p_idx], x[prof_idx]])
-            neg_probs.append(self.rel_classifier(pair_features))
+        if not possible_pairs:
+            return torch.tensor([], device=entity_embeddings.device), torch.tensor([], device=entity_embeddings.device)
+        
+        # Выбираем случайное подмножество пар в качестве отрицательных примеров
+        num_neg = max(1, int(len(possible_pairs) * ratio))
+        sampled_pairs = random.sample(possible_pairs, min(num_neg, len(possible_pairs)))
+
+        for i, j in sampled_pairs:
+            pair_features = torch.cat([entity_embeddings[i], entity_embeddings[j]])
+            neg_probs.append(self.rel_classifiers[rel_type](pair_features))
             neg_targets.append(0.0)
         
         if neg_probs:
-            return torch.cat(neg_probs).view(-1), torch.tensor(neg_targets, device=x.device)
-        return torch.tensor([], device=x.device), torch.tensor([], device=x.device)
+            return torch.cat(neg_probs).view(-1), torch.tensor(neg_targets, device=entity_embeddings.device)
+        return torch.tensor([], device=entity_embeddings.device), torch.tensor([], device=entity_embeddings.device)
 
     def save_pretrained(self, save_dir, tokenizer=None):
         """Сохраняет модель, конфигурацию и токенизатор в указанную директорию."""
@@ -242,41 +292,6 @@ class NERRelationModel(nn.Module):
         model.eval()
         return model
 
-# def visualize_relations(entities, relations, text):
-#     G = nx.DiGraph()
-    
-#     # Добавляем узлы
-#     for i, ent in enumerate(entities):
-#         G.add_node(i, 
-#                   label=f"{ent['type']}: {ent['text']}",
-#                   color='skyblue' if ent['type'] == 'PERSON' else 'lightgreen')
-    
-#     # Добавляем ребра
-#     for rel in relations:
-#         if rel['type'] == 'WORKS_AS':
-#             G.add_edge(rel['arg1_idx'], rel['arg2_idx'], 
-#                       label='WORKS_AS', 
-#                       weight=rel['confidence'])
-    
-#     # Визуализация
-#     pos = nx.spring_layout(G)
-#     plt.figure(figsize=(12, 8))
-    
-#     node_colors = [G.nodes[n]['color'] for n in G.nodes()]
-#     edge_labels = nx.get_edge_attributes(G, 'label')
-    
-#     nx.draw(G, pos, 
-#             with_labels=True, 
-#             labels={n: G.nodes[n]['label'] for n in G.nodes()},
-#             node_color=node_colors,
-#             node_size=2000,
-#             font_size=10,
-#             arrows=True)
-    
-#     nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels)
-#     plt.title(f"Relation Graph for: {text[:50]}...")
-#     plt.show()
-
 class NERELDataset(Dataset):
     def __init__(self, data_dir, tokenizer, max_length=512):
         self.data_dir = data_dir
@@ -308,50 +323,71 @@ class NERELDataset(Dataset):
         
         with open(ann_path, 'r', encoding='utf-8') as f:
             for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                
                 if line.startswith('T'):
-                    parts = line.strip().split('\t')
+                    parts = line.split('\t')
+                    if len(parts) < 3:
+                        continue 
+
                     entity_id = parts[0]
                     type_and_span = parts[1].split()
                     entity_type = type_and_span[0]
-                    
-                    if entity_type in ['PERSON', 'PROFESSION']:
-                        start = int(type_and_span[1])
-                        end = int(type_and_span[-1])
-                        entity_text = parts[2]
+
+                    # Поддерживаемые типы сущностей
+                    if entity_type in ['PERSON', 'PROFESSION', 'ORGANIZATION', 'FAMILY']:
+                        try:
+                            start = int(type_and_span[1])
+                            end = int(type_and_span[-1])
+                            entity_text = parts[2]
                             
-                        # Verify entity span matches text
-                        if text[start:end] != entity_text:
-                            # Try to find correct span
-                            found_pos = text.find(entity_text)
-                            if found_pos != -1:
-                                start = found_pos
-                                end = found_pos + len(entity_text)
+                            # Verify entity span matches text
+                            if text[start:end] != entity_text:
+                                # Try to find correct span
+                                found_pos = text.find(entity_text)
+                                if found_pos != -1:
+                                    start = found_pos
+                                    end = found_pos + len(entity_text)
                         
-                        entity = {
-                            'id': entity_id,
-                            'type': entity_type,
-                            'start': start,
-                            'end': end,
-                            'text': entity_text
-                        }
-                        entities.append(entity)
-                        entity_map[entity_id] = entity
+                            entity = {
+                                'id': entity_id,
+                                'type': entity_type,
+                                'start': start,
+                                'end': end,
+                                'text': entity_text
+                            }
+                            entities.append(entity)
+                            entity_map[entity_id] = entity
                 
                 elif line.startswith('R'):
-                    parts = line.strip().split('\t')
-                    rel_type = parts[1].split()[0]
-                    arg1 = parts[1].split()[1].split(':')[1]
-                    arg2 = parts[1].split()[2].split(':')[1]
+                    parts = line.strip()split('\t')
+                    if len(parts) < 2:
+                        continue
                     
-                    if rel_type == 'WORKS_AS' and arg1 in entity_map and arg2 in entity_map:
-                        # Проверяем типы сущностей для отношения WORKS_AS
-                        if entity_map[arg1]['type'] == 'PERSON' and entity_map[arg2]['type'] == 'PROFESSION':
+                    try:
+                        rel_type = parts[1].split()[0]
+                        arg1 = parts[1].split()[1].split(':')[1]
+                        arg2 = parts[1].split()[2].split(':')[1]
+                    
+                        # Проверяем существование сущностей
+                        if arg1 not in entity_map or arg2 not in entity_map:
+                            continue
+                        
+                        e1_type = entity_map[arg1]['type']
+                        e2_type = entity_map[arg2]['type']
+                    
+                        if self._is_valid_pair(e1_type, e2_type, rel_type):
                             relations.append({
                                 'type': rel_type,
                                 'arg1': arg1,
                                 'arg2': arg2
                             })
-        
+
+                    except (IndexError, KeyError):
+                        continue
+    
         return entities, relations
     
     def __len__(self):
@@ -371,7 +407,7 @@ class NERELDataset(Dataset):
             return_tensors='pt'
         )
         
-        # Initialize NER labels (0=O, 1=B-PER, 2=I-PER, 3=B-PROF, 4=I-PROF)
+        # Initialize NER labels (0=O, 1=B-PER, 2=I-PER, 3=B-PROF, 4=I-PROF, 5=B-ORGANIZATION, 6=I-ORGANIZATION, 7=B-FAMILY, 8=I-FAMILY)
         ner_labels = torch.zeros(self.max_length, dtype=torch.long)
         token_entities = []
 
@@ -392,10 +428,16 @@ class NERELDataset(Dataset):
                 if entity['type'] == 'PERSON':
                     ner_labels[start_token] = 1  # B-PER
                     ner_labels[start_token+1:end_token+1] = 2  # I-PER
-                else:
+                elif entity['type'] == 'PROFESSION':
                     ner_labels[start_token] = 3  # B-PROF
                     ner_labels[start_token+1:end_token+1] = 4  # I-PROF
-                
+                elif entity['type'] == 'ORGANIZATION':
+                    ner_labels[start_token] = 5  # B-ORG
+                    ner_labels[start_token+1:end_token+1] = 6  # I-ORG
+                elif entity['type'] == 'FAMILY':
+                    ner_labels[start_token] = 7  # B-FAM
+                    ner_labels[start_token+1:end_token+1] = 8  # I-FAM
+
                 token_entities.append({
                     'start': start_token,
                     'end': end_token,
@@ -420,29 +462,55 @@ class NERELDataset(Dataset):
                 e1_type = token_entities[arg1_token_idx]['type']
                 e2_type = token_entities[arg2_token_idx]['type']
                 
-                # Убедимся, что PERSON идет первым в паре
-                if e1_type == 'PERSON' and e2_type == 'PROFESSION':
+                # Validate relation type and entity types
+                if relation['type'] == 'WORKS_AS' and e1_type == 'PERSON' and e2_type == 'PROFESSION':
                     rel_data['pairs'].append((arg1_token_idx, arg2_token_idx))
-                    rel_data['labels'].append(1)
-                elif e1_type == 'PROFESSION' and e2_type == 'PERSON':
-                    rel_data['pairs'].append((arg2_token_idx, arg1_token_idx))
-                    rel_data['labels'].append(1) 
+                    rel_data['labels'].append(RELATION_TYPES['WORKS_AS'])
+                elif relation['type'] == 'MEMBER_OF' and e1_type == 'PERSON' and e2_type == 'ORGANIZATION':
+                    rel_data['pairs'].append((arg1_token_idx, arg2_token_idx))
+                    rel_data['labels'].append(RELATION_TYPES['MEMBER_OF'])
+                elif relation['type'] == 'FOUNDED_BY' and e1_type == 'ORGANIZATION' and e2_type == 'PERSON':
+                    rel_data['pairs'].append((arg2_token_idx, arg1_token_idx))  # Reverse order
+                    rel_data['labels'].append(RELATION_TYPES['FOUNDED_BY'])
+                elif relation['type'] in ['SPOUSE', 'PARENT_OF', 'SIBLING'] and e1_type == 'PERSON' and e2_type == 'PERSON':
+                    rel_data['pairs'].append((arg1_token_idx, arg2_token_idx))
+                    rel_data['labels'].append(RELATION_TYPES[relation['type']])
+                elif relation['type'] == 'PARENT_OF' and e1_type == 'PERSON' and e2_type == 'FAMILY':
+                    rel_data['pairs'].append((arg1_token_idx, arg2_token_idx))
+                    rel_data['labels'].append(RELATION_TYPES['PARENT_OF'])
         return {
             'input_ids': encoding['input_ids'].squeeze(0),
             'attention_mask': encoding['attention_mask'].squeeze(0),
             'ner_labels': ner_labels,
             'rel_data': rel_data,
-            'text': text
+            'text': text,
+            'offset_mapping': encoding['offset_mapping'].squeeze(0)
         }
 
 def collate_fn(batch):
-    # Все элементы batch уже имеют одинаковую длину благодаря padding='max_length'
+    # All elements already padded to max_length
     input_ids = torch.stack([item['input_ids'] for item in batch])
     attention_mask = torch.stack([item['attention_mask'] for item in batch])
     ner_labels = torch.stack([item['ner_labels'] for item in batch])
-    
+    offset_mapping = torch.stack([item['offset_mapping'] for item in batch])
+
+    rel_data = []
     # Собираем rel_data как список словарей
-    rel_data = [item['rel_data'] for item in batch]
+    for item in batch:
+        rel_entry = {
+            'entities': item['rel_data']['entities'],
+            'pairs': [],
+            'labels': []
+        }
+        
+        # Convert relation labels to tensor
+        if item['rel_data']['labels']:
+            rel_entry['pairs'] = item['rel_data']['pairs']
+            rel_entry['labels'] = torch.tensor(item['rel_data']['labels'], dtype=torch.long)
+        else:
+            rel_entry['labels'] = torch.tensor([], dtype=torch.long)
+            
+        rel_data.append(rel_entry)
     
     return {
         'input_ids': input_ids,
@@ -450,6 +518,7 @@ def collate_fn(batch):
         'ner_labels': ner_labels,
         'rel_data': rel_data,
         'texts': [item['text'] for item in batch]  # Добавляем исходные тексты для отладки
+        'offset_mapping': offset_mapping
     }
 
 def train_model():
@@ -481,17 +550,10 @@ def train_model():
         {'params': model.rel_classifier.parameters(), 'lr': 1e-3}
     ])
     
-    # # Анализ данных перед обучением
-    # print("\nData analysis:")
-    # sample = train_dataset[0]
-    # print("Sample keys:", sample.keys())
-    # print("NER labels example:", sample['ner_labels'][:10])
-    # print("Relation data example:", sample['rel_data'])
-
     # Training loop
     best_ner_f1 = 0
     # Цикл обучения
-    for epoch in range(10):
+    for epoch in range(1):
         model.train()
         epoch_loss = 0
         ner_correct = ner_total = 0
@@ -568,21 +630,27 @@ def train_model():
     
     return model, tokenizer
 
-def predict(text, model, tokenizer, device="cuda"):
-    encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True)
-    tokens = tokenizer.convert_ids_to_tokens(encoding['input_ids'][0])
-    encoding = {k: v.to(device) for k, v in encoding.items()}
+def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
+    # Tokenize input with offset mapping
+    encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, max_length=512, truncation=True)
+    
+    input_ids = encoding['input_ids'].to(device)
+    attention_mask = encoding['attention_mask'].to(device)
+    offset_mapping = encoding['offset_mapping'][0].cpu().numpy()
     
     with torch.no_grad():
         outputs = model(encoding['input_ids'], encoding['attention_mask'])
 
     # Decode NER with CRF
-    mask = encoding['attention_mask'].bool()
+    mask = attention_mask.bool()
     ner_preds = model.crf.decode(outputs['ner_logits'], mask=mask)[0]
+    tokens = tokenizer.convert_ids_to_tokens(input_ids[0])
 
     # Extract entities
     entities = []
     current_entity = None
+    entity_id = 0
+    entity_map = {}
     
     for i, (token, pred) in enumerate(zip(tokens, ner_preds)):
         if token in ['[CLS]', '[SEP]', '[PAD]']:
@@ -601,6 +669,7 @@ def predict(text, model, tokenizer, device="cuda"):
                 'token_ids': [i],
                 'text': token.replace('##', '')
             }
+            entity_id += 1
         elif pred == 2:  # I-PER
             if current_entity and current_entity['type'] == "PERSON":
                 current_entity['end'] = i
@@ -615,8 +684,39 @@ def predict(text, model, tokenizer, device="cuda"):
                 'token_ids': [i],
                 'text': token.replace('##', '')
             }
+            entity_id += 1
         elif pred == 4:  # I-PROF
             if current_entity and current_entity['type'] == "PROFESSION":
+                current_entity['end'] = i
+                current_entity['token_ids'].append(i)
+        elif pred == 5: # B-ORG
+            if current_entity:
+                entities.append(current_entity)
+            current_entity = {
+                'type': "ORGANIZATION",
+                'start': i,
+                'end': i,
+                'token_ids': [i],
+                'text': token.replace('##', '')
+            }
+            entity_id += 1
+        elif pred == 6:  # I-ORG
+            if current_entity and current_entity['type'] == "OARGANIZATION":
+                current_entity['end'] = i
+                current_entity['token_ids'].append(i)
+        elif pred == 7: # B-FAM
+            if current_entity:
+                entities.append(current_entity)
+            current_entity = {
+                'type': "FAMILY",
+                'start': i,
+                'end': i,
+                'token_ids': [i],
+                'text': token.replace('##', '')
+            }
+            entity_id += 1
+        elif pred == 8:  # I-FAM
+            if current_entity and current_entity['type'] == "FAMILY":
                 current_entity['end'] = i
                 current_entity['token_ids'].append(i)
         else:  # O
@@ -627,65 +727,71 @@ def predict(text, model, tokenizer, device="cuda"):
     if current_entity:
         entities.append(current_entity)
 
-    # Filter valid entities
-    entities = [e for e in entities if e['type'] in ['PERSON', 'PROFESSION']]
-
     # Convert token positions to character positions
-    offset_mapping = encoding['offset_mapping'][0].cpu().numpy()
     for entity in entities:
         start_char = offset_mapping[entity['start']][0]
         end_char = offset_mapping[entity['end']][1]
         entity['text'] = text[start_char:end_char]
+        entity['start_char'] = start_char
+        entity['end_char'] = end_char
+        entity_map[entity['id']] = entity
 
     # Extract relations
     relations = []
     if len(entities) >= 2:
-        sequence_output = model.bert(
-            encoding['input_ids'], 
-            encoding['attention_mask']
-        ).last_hidden_state
+        sequence_output = model.bert(input_ids, attention_mask).last_hidden_state
 
-        # Получаем индексы PERSON и PROFESSION
-        person_ents = [i for i, e in enumerate(entities) if e['type'] == 'PERSON']
-        prof_ents = [i for i, e in enumerate(entities) if e['type'] == 'PROFESSION']
+        # Create entity embeddings
+        entity_embeddings = torch.stack([
+            sequence_output[0, e['start']:e['end']+1].mean(dim=0) 
+            for e in entities
+        ])   
+        
+        # Build complete graph
+        edge_index = torch.tensor([
+            [i, j] for i in range(len(entities)) 
+            for j in range(len(entities)) if i != j
+        ], dtype=torch.long).t().contiguous().to(device)
 
-        if person_ents and prof_ents:
-            # Build graph
-            edge_index = torch.tensor([
-                [p_idx, prof_idx] 
-                for p_idx in person_ents 
-                for prof_idx in prof_ents
-            ], dtype=torch.long).t().contiguous().to(device)
-            
-            # Create entity embeddings
-            entity_embeddings = torch.stack([
-                sequence_output[0, e['start']:e['end']+1].mean(dim=0) 
-                for e in entities
-            ])
-            
-            # Apply GAT
-            x = model.gat1(entity_embeddings, edge_index)
-            x = F.relu(x)
-            x = model.gat2(x, edge_index)
-            
-            # Предсказываем отношения
-            for p_idx in person_ents:
-                for prof_idx in prof_ents:
-                    pair_features = torch.cat([x[p_idx], x[prof_idx]])
-                    prob = torch.sigmoid(model.rel_classifier(pair_features)).item()
-                    
-                    if prob > 0.5:
-                        relations.append({
-                            'type': "WORKS_AS",
-                            'arg1_idx': p_idx,
-                            'arg2_idx': prof_idx,
-                            'arg1': entities[p_idx],
-                            'arg2': entities[prof_idx],
-                            'confidence': prob
-                        })
+        # Apply GAT
+        x = model.gat1(entity_embeddings, edge_index)
+        x = F.relu(x)
+        x = model.gat2(x, edge_index)
+        
+        # Predict all possible relations
+        for rel_type in RELATION_TYPES:
+            for i, e1 in enumerate(entities):
+                for j, e2 in enumerate(entities):
+                    if i != j and model._is_valid_pair(e1['type'], e2['type'], rel_type):
+                        pair_features = torch.cat([x[i], x[j]])
+                        logit = model.rel_classifiers[rel_type](pair_features)
+                        prob = torch.sigmoid(logit).item()
+                        
+                        if prob > relation_threshold:
+                            # For FOUNDED_BY we reverse the direction
+                            if rel_type == 'FOUNDED_BY':
+                                i, j = j, i  # Organization should be first
+                            
+                            relations.append({
+                                'type': rel_type,
+                                'arg1_id': e1['id'],
+                                'arg2_id': e2['id'],
+                                'arg1': e1,
+                                'arg2': e2,
+                                'confidence': prob,
+                                'direction': f"{e1['type']}->{e2['type']}"
+                            })
     
-    # Визуализация
-    # visualize_relations(entities, relations, text)
+     # Remove duplicates and keep highest confidence
+    unique_relations = {}
+    for rel in relations:
+        key = (rel['arg1_id'], rel['arg2_id'], rel['type'])
+        if key not in unique_relations or rel['confidence'] > unique_relations[key]['confidence']:
+            unique_relations[key] = rel
+    
+    # Sort by confidence
+    sorted_relations = sorted(unique_relations.values(), 
+                             key=lambda x: x['confidence'], reverse=True)
     
     return {
         'text': text,
@@ -719,5 +825,12 @@ if __name__ == "__main__":
     
     # Использование модели
     result = predict("По улице шел красивый человек, его имя было Мефодий. И был он счастлив. Работал этот чувак в яндексе, разработчиком. Или директором. Он пока не определился!", loaded_model, loaded_tokenizer)
+    print("Сущности:")
+    for e in result['entities']:
+        print(f"{e['type']}: {e['text']} (позиция: {e['start_char']}-{e['end_char']})")
+
+    print("\nОтношения:")
+    for r in result['relations']:
+        print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (confidence: {r['confidence']:.2f})")
 
 
