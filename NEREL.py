@@ -746,7 +746,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
         entity_embeddings = torch.stack([
             sequence_output[0, e['start']:e['end']+1].mean(dim=0) 
             for e in entities
-        ])   
+        ]).to(device)   
         
         # Build complete graph
         edge_index = torch.tensor([
