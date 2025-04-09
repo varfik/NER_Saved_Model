@@ -376,13 +376,11 @@ class NERELDataset(Dataset):
                     e1_type = entity_map[arg1]['type']
                     e2_type = entity_map[arg2]['type']
                 
-                    if self._is_valid_pair(e1_type, e2_type, rel_type):
-                        relations.append({
+                    relations.append({
                             'type': rel_type,
                             'arg1': arg1,
                             'arg2': arg2
-                        })
-    
+                    })
         return entities, relations
     
     def __len__(self):
