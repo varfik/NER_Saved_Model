@@ -135,7 +135,7 @@ class NERRelationModel(nn.Module):
                     edge_index = []
                     for i, e1 in enumerate(valid_entities):
                         for j, e2 in enumerate(valid_entities):
-                            if i != j and self._is_valid_relation_pair(e1['type'], e2['type'], rel_type):
+                            if i != j and self._is_valid_pair(e1['type'], e2['type'], rel_type):
                                 edge_index.append([i, j])
                     
                     if not edge_index:
@@ -163,7 +163,7 @@ class NERRelationModel(nn.Module):
                             e1_type = valid_entities[e1_idx]['type']
                             e2_type = valid_entities[e2_idx]['type']
                 
-                            if self._is_valid_relation_pair(e1_type, e2_type, rel_type):
+                            if self._is_valid_pair(e1_type, e2_type, rel_type):
                                 pair_features = torch.cat([x[e1_idx], x[e2_idx]])
                                 current_probs.append(self.rel_classifiers[rel_type](pair_features))
                                 current_targets.append(label)
