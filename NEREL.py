@@ -489,7 +489,7 @@ def collate_fn(batch):
     offset_mapping = torch.stack([item['offset_mapping'] for item in batch])
 
     device = input_ids.device
-    
+
     rel_data = []
     # Собираем rel_data как список словарей
     for item in batch:
@@ -628,14 +628,15 @@ def train_model():
 
 def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
     # Tokenize input with offset mapping
-    encoding = tokenizer(text, return_tensors="pt")
+    encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, max_length=512,
+        truncation=True)
     
     input_ids = encoding['input_ids'].to(device)
     attention_mask = encoding['attention_mask'].to(device)
     offset_mapping = encoding['offset_mapping'][0].cpu().numpy()
     
     with torch.no_grad():
-        outputs = model(encoding['input_ids'], encoding['attention_mask'])
+        outputs = model(input_ids, attention_mask)
 
     # Decode NER with CRF
     mask = attention_mask.bool()
