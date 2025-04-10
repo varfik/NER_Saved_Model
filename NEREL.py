@@ -127,10 +127,6 @@ class NERRelationModel(nn.Module):
             ner_loss = -self.crf(ner_logits, ner_labels, mask=mask, reduction='mean')
             total_loss += ner_loss
 
-        # Relation extraction
-        rel_probs = {}
-        rel_targets = {}
-
         if rel_data and self.training:
             total_rel_loss = 0
             rel_correct = 0
@@ -186,79 +182,29 @@ class NERRelationModel(nn.Module):
                 # Create entity index map
                 entity_indices = {e['id']: i for i, e in enumerate(valid_entities)}
                 
+                # Process each relation type separately
+                rel_probs = defaultdict(list)
+                rel_targets = defaultdict(list)
 
                 for rel_type in RELATION_TYPES:
-    rel_probs[rel_type] = []
-    rel_targets[rel_type] = []
-    pos_indices = set()
-    pos_count = 0
-    
-    # Collect positive examples
-    for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
-        if label == RELATION_TYPES[rel_type]:
-            if e1_idx in entity_indices and e2_idx in entity_indices:
-                i = entity_indices[e1_idx]
-                j = entity_indices[e2_idx]
-                
-                # Для FOUNDED_BY меняем направление
-                if rel_type == 'FOUNDED_BY':
-                    i, j = j, i
-                
-                pair_features = torch.cat([x[i], x[j]])
-                rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
-                rel_targets[rel_type].append(1.0)
-                pos_indices.add((i, j))
-                pos_count += 1
-
-                # With this improved version:
-                for rel_type in RELATION_TYPES:
-                    rel_probs[rel_type] = []
-                    rel_targets[rel_type] = []
-                    pos_indices = set()
                     pos_count = 0
                     
-                    # Get all pairs and labels for this sample
-                    sample_pairs = sample['pairs'].cpu().numpy() if isinstance(sample['pairs'], torch.Tensor) else sample['pairs']
-                    sample_labels = sample['labels'].cpu().numpy() if isinstance(sample['labels'], torch.Tensor) else sample['labels']
-                    
-                    # Collect positive examples for this relation type
-                    for pair_idx, (e1_idx, e2_idx) in enumerate(sample_pairs):
-                        if sample_labels[pair_idx] == RELATION_TYPES[rel_type]:
-                            if e1_idx in entity_indices and e2_idx in entity_indices:
-                                i = entity_indices[e1_idx]
-                                j = entity_indices[e2_idx]
+                    # Collect positive examples
+                    for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
+                        if label == RELATION_TYPES[rel_type]:
+                            if e1_idx < len(valid_entities) and e2_idx < len(valid_entities):
+                                i = e1_idx
+                                j = e2_idx
                                 
-                                # Handle direction for specific relations
+                                # Для FOUNDED_BY меняем направление
                                 if rel_type == 'FOUNDED_BY':
-                                    i, j = j, i  # Reverse direction
+                                    i, j = j, i
                                 
-                                # Get entity types for validation
-                                e1_type = entity_types[i]
-                                e2_type = entity_types[j]
-                                
-                                # Validate entity types for this relation
-                                valid = False
-                                if rel_type == 'WORKS_AS' and e1_type == 'PERSON' and e2_type == 'PROFESSION':
-                                    valid = True
-                                elif rel_type == 'MEMBER_OF' and e1_type == 'PERSON' and e2_type == 'ORGANIZATION':
-                                    valid = True
-                                elif rel_type == 'FOUNDED_BY' and e1_type == 'ORGANIZATION' and e2_type == 'PERSON':
-                                    valid = True
-                                elif rel_type in ['SPOUSE', 'SIBLING'] and e1_type == 'PERSON' and e2_type == 'PERSON':
-                                    valid = True
-                                elif rel_type == 'PARENT_OF' and (
-                                    (e1_type == 'PERSON' and e2_type == 'PERSON') or 
-                                    (e1_type == 'PERSON' and e2_type == 'FAMILY')
-                                ):
-                                    valid = True
-                                
-                                if valid:
-                                    pair_features = torch.cat([x[i], x[j]])
-                                    rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
-                                    rel_targets[rel_type].append(1.0)
-                                    pos_indices.add((i, j))
-                                    pos_count += 1
-
+                                pair_features = torch.cat([x[i], x[j]])
+                                rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
+                                rel_targets[rel_type].append(1.0)
+                                pos_count += 1
+                    
                     print(f"Тип отношения {rel_type}: найдено {pos_count} положительных примеров")
                     
                     # Generate negative examples for this relation type
@@ -266,16 +212,17 @@ class NERRelationModel(nn.Module):
                         entity_embeddings=x, 
                         entity_types=entity_types, 
                         rel_type=rel_type,
-                        pos_indices=pos_indices,
-                        ratio=1.0
+                        pos_indices={(i,j) for (i,j), label in zip(sample['pairs'], sample['labels']) 
+                                    if label == RELATION_TYPES[rel_type]},
+                        ratio=0.5
                     )
                     
                     if neg_pairs:
                         neg_features, neg_targets = neg_pairs
                         rel_probs[rel_type].extend(neg_features)
                         rel_targets[rel_type].extend(neg_targets)
-
                         print(f"Добавлено {len(neg_targets)} отрицательных примеров для {rel_type}")
+
                     else:
                         print(f"Не удалось сгенерировать отрицательные примеры для {rel_type}")
 
@@ -319,20 +266,37 @@ class NERRelationModel(nn.Module):
         if pos_indices is None:
             pos_indices = set()
         
-        # Генерируем все возможные пары кроме положительных
-        all_pairs = [
-            (i, j) for i in range(len(entity_types))
-            for j in range(len(entity_types))
-            if i != j and (i, j) not in pos_indices
-        ]
+        # Определяем допустимые типы для данного отношения
+        if rel_type == 'WORKS_AS':
+            valid_pairs = [(i,j) for i, e1 in enumerate(entity_types) 
+                        for j, e2 in enumerate(entity_types)
+                        if i != j and e1 == 'PERSON' and e2 == 'PROFESSION']
+        elif rel_type == 'MEMBER_OF':
+            valid_pairs = [(i,j) for i, e1 in enumerate(entity_types)
+                        for j, e2 in enumerate(entity_types)
+                        if i != j and e1 == 'PERSON' and e2 == 'ORGANIZATION']
+        elif rel_type == 'FOUNDED_BY':
+            valid_pairs = [(i,j) for i, e1 in enumerate(entity_types)
+                        for j, e2 in enumerate(entity_types)
+                        if i != j and e1 == 'ORGANIZATION' and e2 == 'PERSON']
+        elif rel_type in ['SPOUSE', 'SIBLING']:
+            valid_pairs = [(i,j) for i, e1 in enumerate(entity_types)
+                        for j, e2 in enumerate(entity_types)
+                        if i != j and e1 == 'PERSON' and e2 == 'PERSON']
+        else:
+            valid_pairs = [(i,j) for i in range(len(entity_types))
+                        for j in range(len(entity_types)) if i != j]
+        
+        # Исключаем положительные примеры
+        valid_pairs = [p for p in valid_pairs if p not in pos_indices]
         
         # Для симметричных отношений учитываем только уникальные пары
         if rel_type in ['SPOUSE', 'SIBLING']:
-            all_pairs = list({(min(i,j), max(i,j)) for i,j in all_pairs})
+            valid_pairs = list({(min(i,j), max(i,j)) for i,j in valid_pairs})
         
-        # Выбираем случайное подмножество
-        num_samples = min(len(all_pairs), int(len(all_pairs) * ratio))
-        sampled_pairs = random.sample(all_pairs, num_samples) if all_pairs else []
+        # Выбираем случайное подмножество (не более 5 отрицательных на 1 положительный)
+        num_samples = min(len(valid_pairs), max(5 * len(pos_indices), 10))
+        sampled_pairs = random.sample(valid_pairs, num_samples) if valid_pairs else []
         
         for i, j in sampled_pairs:
             # Для FOUNDED_BY меняем направление
@@ -342,7 +306,7 @@ class NERRelationModel(nn.Module):
             pair_features = torch.cat([entity_embeddings[i], entity_embeddings[j]])
             neg_probs.append(self.rel_classifiers[rel_type](pair_features))
             neg_targets.append(0.0)
-    
+
         if neg_probs:
             return torch.stack(neg_probs).view(-1, 1), torch.tensor(neg_targets, device=device)
         return None
@@ -493,26 +457,28 @@ class NERELDataset(Dataset):
                         entity_map[entity_id] = entity
                 
                 elif line.startswith('R'):
-                    parts = line.strip().split('\t')
+                    parts = line.split('\t')
                     if len(parts) < 2:
                         continue
                     
-                    rel_type = parts[1].split()[0]
-                    arg1 = parts[1].split()[1].split(':')[1]
-                    arg2 = parts[1].split()[2].split(':')[1]
-                
-                    # Проверяем существование сущностей
-                    if arg1 not in entity_map or arg2 not in entity_map:
+                    rel_info = parts[1].split()
+                    if len(rel_info) < 3:
                         continue
                     
-                    e1_type = entity_map[arg1]['type']
-                    e2_type = entity_map[arg2]['type']
-                
-                    relations.append({
+                    rel_type = rel_info[0]
+                    arg1 = rel_info[1].split(':')[1] if ':' in rel_info[1] else None
+                    arg2 = rel_info[2].split(':')[1] if ':' in rel_info[2] else None
+                    
+                    if not arg1 or not arg2:
+                        continue
+                    
+                    # Проверяем существование сущностей
+                    if arg1 in entity_map and arg2 in entity_map:
+                        relations.append({
                             'type': rel_type,
                             'arg1': arg1,
                             'arg2': arg2
-                    })
+                        })
         return entities, relations
     
     def __len__(self):
@@ -583,26 +549,10 @@ class NERELDataset(Dataset):
             arg1_token_idx = token_entity_id_to_idx.get(relation['arg1'], -1)
             arg2_token_idx = token_entity_id_to_idx.get(relation['arg2'], -1)
             
-            if arg1_token_idx != -1 and arg2_token_idx != -1:
-                e1_type = token_entities[arg1_token_idx]['type']
-                e2_type = token_entities[arg2_token_idx]['type']
+            if arg1_token_idx != -1 and arg2_token_idx != -1 and relation['type'] in RELATION_TYPES:
+                rel_data['pairs'].append((arg1_token_idx, arg2_token_idx))
+                rel_data['labels'].append(RELATION_TYPES[relation['type']])
                 
-                # Validate relation type and entity types
-                if relation['type'] == 'WORKS_AS' and e1_type == 'PERSON' and e2_type == 'PROFESSION':
-                    rel_data['pairs'].append((arg1_token_idx, arg2_token_idx))
-                    rel_data['labels'].append(RELATION_TYPES['WORKS_AS'])
-                elif relation['type'] == 'MEMBER_OF' and e1_type == 'PERSON' and e2_type == 'ORGANIZATION':
-                    rel_data['pairs'].append((arg1_token_idx, arg2_token_idx))
-                    rel_data['labels'].append(RELATION_TYPES['MEMBER_OF'])
-                elif relation['type'] == 'FOUNDED_BY' and e1_type == 'ORGANIZATION' and e2_type == 'PERSON':
-                    rel_data['pairs'].append((arg2_token_idx, arg1_token_idx))  # Reverse order
-                    rel_data['labels'].append(RELATION_TYPES['FOUNDED_BY'])
-                elif relation['type'] in ['SPOUSE', 'PARENT_OF', 'SIBLING'] and e1_type == 'PERSON' and e2_type == 'PERSON':
-                    rel_data['pairs'].append((arg1_token_idx, arg2_token_idx))
-                    rel_data['labels'].append(RELATION_TYPES[relation['type']])
-                elif relation['type'] == 'PARENT_OF' and e1_type == 'PERSON' and e2_type == 'FAMILY':
-                    rel_data['pairs'].append((arg1_token_idx, arg2_token_idx))
-                    rel_data['labels'].append(RELATION_TYPES['PARENT_OF'])
         return {
             'input_ids': encoding['input_ids'].squeeze(0),
             'attention_mask': encoding['attention_mask'].squeeze(0),
