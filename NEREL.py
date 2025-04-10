@@ -117,10 +117,13 @@ class NERRelationModel(nn.Module):
         outputs = self.bert(input_ids, attention_mask=attention_mask)
         sequence_output = outputs.last_hidden_state
         
+        # Initialize outputs
+        rel_probs = defaultdict(list)
+        total_loss = 0
+
         # NER prediction with CRF
         ner_logits = self.ner_classifier(sequence_output)
-        total_loss = 0
-        
+
         # NER loss
         if ner_labels is not None:
             mask = attention_mask.bool()
@@ -791,7 +794,13 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.3):
     for entity in entities:
         entity['text'] = text[entity['start_char']:entity['end_char']]
 
-
+    if len(entities) < 2:  # Не может быть отношений, если меньше 2 сущностей
+        return {
+            'text': text,
+            'entities': entities,
+            'relations': []
+        }
+        
     # Extract relations
     relations = []
     entity_map = {e['id']: e for e in entities}
