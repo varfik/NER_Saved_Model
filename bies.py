@@ -149,6 +149,8 @@ class NERRelationModel(nn.Module):
         rel_targets = {}
 
         if rel_data and self.training:
+            rel_correct_by_class = {rel: 0 for rel in RELATION_TYPES}
+            rel_total_by_class = {rel: 0 for rel in RELATION_TYPES}
             total_rel_loss = 0
             rel_correct = 0
             rel_total = 0
@@ -250,13 +252,20 @@ class NERRelationModel(nn.Module):
                             total_loss += rel_loss
 
                         preds = (torch.sigmoid(probs_tensor) > 0.5).float()
-                        rel_correct += (preds == targets_tensor).sum().item()
-                        rel_total += targets_tensor.size(0)
+                        correct = (preds == targets_tensor).sum().item()
+                        total = targets_tensor.size(0)
+                        rel_correct_by_class[rel_type] += correct
+                        rel_total_by_class[rel_type] += total
 
         return {
             'ner_logits': ner_logits,
             'rel_probs': rel_probs,
-            'loss': total_loss if total_loss != 0 else None
+            'loss': total_loss if total_loss != 0 else None,
+            'rel_accuracy_by_class': {
+                rel: rel_correct_by_class[rel] / rel_total_by_class[rel]
+                if rel_total_by_class[rel] > 0 else None
+                for rel in RELATION_TYPES
+            }
         }
 
     def _is_valid_pair(self, e1_type, e2_type, rel_type):
