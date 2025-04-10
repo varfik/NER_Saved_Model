@@ -575,7 +575,10 @@ def train_model():
             if outputs['rel_probs']:
                 for rel_type, probs in outputs['rel_probs'].items():
                     if len(probs) > 0:
+                        if isinstance(probs, list):
+                            probs = torch.cat(probs) if isinstance(probs[0], torch.Tensor) else torch.tensor(probs, device=device)
                         preds = (torch.sigmoid(probs) > 0.5).long()
+
                         # Get targets for this relation type
                         targets = []
                         for item in batch['rel_data']:
