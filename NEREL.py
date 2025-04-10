@@ -219,7 +219,13 @@ class NERRelationModel(nn.Module):
                 
                     # Calculate loss for this relation type
                     if rel_probs[rel_type]:
-                        probs_tensor = torch.cat(rel_probs[rel_type]).view(-1)
+                        if len(rel_probs[rel_type]) > 0:
+                            # Убедимся, что все тензоры имеют правильную размерность
+                            rel_probs_list = [p.view(-1) if p.dim() == 0 else p for p in rel_probs[rel_type]]
+                            probs_tensor = torch.cat(rel_probs_list).view(-1)
+                        else:
+                            # Если нет примеров для этого типа отношений, пропускаем
+                            continue
                         targets_tensor = torch.tensor(rel_targets[rel_type], dtype=torch.float, device=device)
 
                         # Adjust pos_weight based on class imbalance
@@ -292,7 +298,7 @@ class NERRelationModel(nn.Module):
                 neg_targets.append(0.0)
         
         if neg_probs:
-            return torch.stack(neg_probs).squeeze(), torch.tensor(neg_targets, device=device)
+            return torch.stack(neg_probs).view(-1, 1), torch.tensor(neg_targets, device=device)
         return None
 
     def save_pretrained(self, save_dir, tokenizer=None):
