@@ -139,6 +139,7 @@ class NERRelationModel(nn.Module):
             # Process each sample in batch
             for batch_idx, sample in enumerate(rel_data):
                 if 'pairs' not in sample or len(sample['pairs']) == 0:
+                    print(f"Пропуск примера {batch_idx}: нет пар отношений")
                     continue
                     
                 # Get valid entities with type information
@@ -148,8 +149,13 @@ class NERRelationModel(nn.Module):
                 ]
                 
                 if len(valid_entities) < 2:
+                    rint(f"Пропуск примера {batch_idx}: недостаточно сущностей ({len(valid_entities)})")
                     continue
-                    
+
+                print(f"\nОбработка примера {batch_idx}:")
+                print(f"Сущности: {[(e['type'], e['id']) for e in valid_entities]}")
+                print(f"Пары отношений: {sample['pairs']}")
+                print(f"Метки отношений: {sample['labels']}") 
                 # Create entity embeddings
                 entity_embeddings = []
                 entity_types = []
@@ -204,7 +210,8 @@ class NERRelationModel(nn.Module):
                                     rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
                                     rel_targets[rel_type].append(1.0)
                                     pos_indices.add((i, j))
-
+                    print(f"Тип отношения {rel_type}: найдено {pos_count} положительных примеров")
+                    
                     # Generate negative examples for this relation type
                     neg_pairs = self._generate_negative_examples(
                         entity_embeddings=x, 
@@ -218,6 +225,11 @@ class NERRelationModel(nn.Module):
                         neg_features, neg_targets = neg_pairs
                         rel_probs[rel_type].extend(neg_features)
                         rel_targets[rel_type].extend(neg_targets)
+
+                        print(f"Добавлено {len(neg_targets)} отрицательных примеров для {rel_type}")
+                    else:
+                        print(f"Не удалось сгенерировать отрицательные примеры для {rel_type}")
+
                 
                     # Calculate loss for this relation type
                     if rel_probs[rel_type]:
@@ -227,13 +239,20 @@ class NERRelationModel(nn.Module):
 
                         # Adjust pos_weight based on class imbalance
                         pos_weight = torch.tensor([
-                            max(1.0, len(targets_tensor) / (sum(targets_tensor) + 1e-6))
+                            max(1.0, len(targets_tensor) / (sum(targets_tensor) + 1e-6)) * 5.0  # Увеличенный коэффициент
                         ], device=device)
                         
                         rel_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(
                             probs_tensor, targets_tensor)
                         total_loss += rel_loss * 1.0  # Weight relation loss
 
+                        # Отладочная информация
+                        preds = (torch.sigmoid(probs_tensor) > 0.5).long()
+                        correct = (preds == targets_tensor.long()).sum().item()
+                        accuracy = correct / len(targets_tensor)
+                        
+                        print(f"Отношение {rel_type}: loss={rel_loss.item():.4f}, accuracy={accuracy:.2%}, "
+                            f"pos/neg={sum(targets_tensor)}/{len(targets_tensor)-sum(targets_tensor)}")
         return {
             'ner_logits': ner_logits,
             'rel_probs': rel_probs,
@@ -270,6 +289,8 @@ class NERRelationModel(nn.Module):
                     continue
                 if self._is_valid_pair(e1_type, e2_type, rel_type):
                     possible_pairs.append((i, j))
+
+        print(f"Всего возможных валидный пар: {len(possible_pairs)}")
         
         # For symmetric relations, we need to consider both directions
         if rel_type in ['SPOUSE', 'SIBLING']:
@@ -277,25 +298,88 @@ class NERRelationModel(nn.Module):
                 (min(i, j), max(i, j)) 
                 for i, j in possible_pairs
             ))
+            print(f"Уникальные пары после обработки симметричных отношений: {len(possible_pairs)}")
 
-         # Sample negative examples
-        num_neg = max(1, int(len(possible_pairs) * ratio))
-        if num_neg > len(possible_pairs):
-            num_neg = len(possible_pairs)
 
-        if num_neg > 0:
-            sampled_pairs = random.sample(possible_pairs, num_neg)
-            for i, j in sampled_pairs:
-                # For FOUNDED_BY, we need to reverse the direction
-                if rel_type == 'FOUNDED_BY':
-                    i, j = j, i
-                
-                pair_features = torch.cat([entity_embeddings[i], entity_embeddings[j]])
-                neg_probs.append(self.rel_classifiers[rel_type](pair_features))
-                neg_targets.append(0.0)
+         # 3. Стратегия выборки:
+        # - 50% случайных пар
+        # - 30% "сложных" пар (близкие по эмбеддингам)
+        # - 20% пар с похожими типами сущностей
         
+        num_random = max(1, int(len(possible_pairs) * ratio * 0.5))
+        num_hard = max(1, int(len(possible_pairs) * ratio * 0.3))
+        num_type = max(1, int(len(possible_pairs) * ratio * 0.2))
+
+        # 3.1 Случайные отрицательные примеры
+        if len(possible_pairs) > num_random:
+            sampled_random = random.sample(possible_pairs, num_random)
+        else:
+            sampled_random = possible_pairs
+        
+        print(f"Выбрано случайных пар: {len(sampled_random)}")
+
+        # 3.2 "Сложные" отрицательные примеры (близкие в пространстве эмбеддингов)
+        if len(possible_pairs) > 1:
+            # Вычисляем попарные расстояния
+            with torch.no_grad():
+                all_embs = entity_embeddings.cpu().numpy()
+                distances = np.zeros((len(all_embs), len(all_embs)))
+                
+                for i in range(len(all_embs)):
+                    for j in range(len(all_embs)):
+                        if i != j:
+                            distances[i,j] = np.linalg.norm(all_embs[i] - all_embs[j])
+            
+            # Выбираем пары с минимальными расстояниями
+            flat_indices = np.argpartition(distances.ravel(), num_hard)[:num_hard]
+            hard_pairs = [np.unravel_index(i, distances.shape) for i in flat_indices]
+            hard_pairs = [(i,j) for i,j in hard_pairs if i != j and (i,j) in possible_pairs]
+            
+            if len(hard_pairs) > num_hard:
+                hard_pairs = random.sample(hard_pairs, num_hard)
+        else:
+            hard_pairs = []
+        
+        print(f"Выбрано сложных пар: {len(hard_pairs)}")
+
+        # 3.3 Пары с похожими типами сущностей
+        type_pairs = []
+        type_counts = defaultdict(int)
+        
+        for i, j in possible_pairs:
+            key = (entity_types[i], entity_types[j])
+            if type_counts[key] < num_type // len(ENTITY_TYPES)**2:
+                type_pairs.append((i,j))
+                type_counts[key] += 1
+        
+        if len(type_pairs) > num_type:
+            type_pairs = random.sample(type_pairs, num_type)
+        
+        print(f"Выбрано пар по типам: {len(type_pairs)}")
+
+        # Объединяем все стратегии
+        all_neg_pairs = list(set(sampled_random + hard_pairs + type_pairs))
+        print(f"Всего отрицательных пар после объединения: {len(all_neg_pairs)}")
+
+        # 4. Создаем примеры
+        for i, j in all_neg_pairs:
+            # Для FOUNDED_BY нужно обратить направление
+            if rel_type == 'FOUNDED_BY':
+                i, j = j, i
+            
+            pair_features = torch.cat([entity_embeddings[i], entity_embeddings[j]])
+            neg_probs.append(self.rel_classifiers[rel_type](pair_features))
+            neg_targets.append(0.0)
+            
+            # Отладочная информация
+            if random.random() < 0.1:  # Выводим 10% примеров для проверки
+                print(f"Отрицательный пример: {entity_types[i]} -> {entity_types[j]}")
+
         if neg_probs:
+            print(f"Сгенерировано отрицательных примеров для {rel_type}: {len(neg_probs)}")
             return torch.stack(neg_probs).view(-1, 1), torch.tensor(neg_targets, device=device)
+        
+        print(f"Не удалось сгенерировать отрицательные примеры для {rel_type}")
         return None
 
     def save_pretrained(self, save_dir, tokenizer=None):
@@ -303,51 +387,75 @@ class NERRelationModel(nn.Module):
         os.makedirs(save_dir, exist_ok=True)
         
         # 1. Сохраняем веса модели
-        torch.save(self.state_dict(), os.path.join(save_dir, "pytorch_model.bin"))
+        model_path = os.path.join(save_dir, "pytorch_model.bin")
+        torch.save(self.state_dict(), model_path)
         
-        # 2. Сохраняем конфигурацию модели в формате Hugging Face
+        # 2. Сохраняем конфигурацию модели
         config = {
-            "model_type": "bert",  # Указываем тип модели для Hugging Face
-            "model_name": self.bert.name_or_path,
+            "model_type": "bert-ner-rel",
+            "model_name": getattr(self.bert, "name_or_path", "custom"),
             "num_ner_labels": self.num_ner_labels,
-            "bert_config": self.bert.config.to_dict()
+            "num_rel_labels": len(RELATION_TYPES),  # Добавляем
+            "bert_config": self.bert.config.to_diff_dict(),  # Более безопасный метод
+            "model_config": {  # Добавляем специфичные для модели параметры
+                "gat_hidden_size": 64,
+                "gat_heads": 4
+            }
         }
-        with open(os.path.join(save_dir, "config.json"), "w") as f:
-            json.dump(config, f, indent=2)
         
-        # 3. Сохраняем конфигурацию токенизатора
+        config_path = os.path.join(save_dir, "config.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        
+        # 3. Сохраняем токенизатор
         if tokenizer is not None:
             tokenizer.save_pretrained(save_dir)
-    
+        
     @classmethod
     def from_pretrained(cls, model_dir, device="cuda"):
         """Загружает модель из указанной директории."""
-        # 1. Загружаем конфигурацию
-        config_path = os.path.join(model_dir, "config.json")
-        with open(config_path, "r") as f:
-            config = json.load(f)
-        
-        # 2. Инициализируем BERT с сохраненной конфигурацией
-        bert_config = BertConfig.from_dict(config["bert_config"])
-        bert = AutoModel.from_config(bert_config)
-        
-        # 3. Создаем экземпляр модели
-        model = cls(
-            model_name=config["model_name"],
-            num_ner_labels=config["num_ner_labels"]
-        ).to(device)
-        
-        # 4. Заменяем BERT на загруженную версию
-        model.bert = bert.to(device)
-        
-        # 5. Загружаем веса модели
-        model.load_state_dict(torch.load(
-            os.path.join(model_dir, "pytorch_model.bin"), 
-            map_location=device
-        ))
-        
-        model.eval()
-        return model
+        try:
+            device = torch.device(device)
+            
+            # 1. Загружаем конфигурацию
+            config_path = os.path.join(model_dir, "config.json")
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(f"Config file not found at {config_path}")
+                
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            
+            # 2. Инициализируем BERT
+            if "bert_config" not in config:
+                raise ValueError("Invalid config: missing bert_config")
+                
+            bert_config = BertConfig.from_dict(config["bert_config"])
+            bert = AutoModel.from_config(bert_config)
+            
+            # 3. Создаем экземпляр модели
+            model = cls(
+                model_name=config.get("model_name", "DeepPavlov/rubert-base-cased"),
+                num_ner_labels=config.get("num_ner_labels", 9),
+                num_rel_labels=config.get("num_rel_labels", len(RELATION_TYPES))
+            ).to(device)
+            
+            # 4. Загружаем веса
+            model_path = os.path.join(model_dir, "pytorch_model.bin")
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"Model weights not found at {model_path}")
+                
+            state_dict = torch.load(model_path, map_location=device)
+            model.load_state_dict(state_dict)
+            
+            # 5. Загружаем BERT
+            model.bert = bert.to(device)
+            model.bert.load_state_dict(state_dict, strict=False)  # Загружаем только совпадающие ключи
+            
+            model.eval()
+            return model
+            
+        except Exception as e:
+            raise RuntimeError(f"Error loading model from {model_dir}: {str(e)}")
 
 class NERELDataset(Dataset):
     def __init__(self, data_dir, tokenizer, max_length=512):
@@ -589,13 +697,11 @@ def train_model():
 
     # Optimizer with different learning rates
     optimizer = AdamW([
-        {'params': model.bert.parameters(), 'lr': 2e-5},
-        {'params': model.ner_classifier.parameters(), 'lr': 1e-4},
-        {'params': model.crf.parameters(), 'lr': 1e-4},
-        {'params': model.gat1.parameters(), 'lr': 1e-3},
-        {'params': model.gat2.parameters(), 'lr': 1e-3},
-        {'params': model.rel_classifiers.parameters(), 'lr': 1e-3}
-    ])
+    {'params': model.bert.parameters(), 'lr': 3e-5},
+    {'params': model.ner_classifier.parameters(), 'lr': 5e-5},
+    {'params': model.crf.parameters(), 'lr': 5e-5},
+    {'params': model.relation_head.parameters(), 'lr': 1e-4}
+])
     
     # Training loop
     best_ner_f1 = 0
@@ -683,7 +789,7 @@ def train_model():
     
     return model, tokenizer
 
-def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
+def predict(text, model, tokenizer, device="cuda", relation_threshold=0.3):
     # Tokenize input with offset mapping
     encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, max_length=512,
         truncation=True)
