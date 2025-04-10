@@ -40,7 +40,7 @@ RELATION_TYPES = {
 RELATION_TYPES_INV = {v: k for k, v in RELATION_TYPES.items()}
 
 class NERRelationModel(nn.Module):
-    def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=11, num_rel_labels=9):
+    def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=len(ENTITY_TYPES)*2+1, num_rel_labels=len(RELATION_TYPES)):
         super().__init__()
         # Initialize NER labels (0=O, 1=B-PER, 2=I-PER, ..., 9=B-LOC, 10=I-LOC)
         self.num_ner_labels = num_ner_labels 
@@ -370,12 +370,16 @@ class NERRelationModel(nn.Module):
                 raise ValueError("Invalid config: missing bert_config")
                 
             bert_config = BertConfig.from_dict(config["bert_config"])
-            bert = AutoModel.from_config(bert_config)
+            bert = AutoModel.from_pretrained(
+                model_dir,
+                config=bert_config,
+                ignore_mismatched_sizes=True
+            )
             
             # 3. Создаем экземпляр модели
             model = cls(
                 model_name=config.get("model_name", "DeepPavlov/rubert-base-cased"),
-                num_ner_labels=config.get("num_ner_labels", 9),
+                num_ner_labels=config.get("num_ner_labels", len(ENTITY_TYPES)*2+1),
                 num_rel_labels=config.get("num_rel_labels", len(RELATION_TYPES))
             ).to(device)
             
@@ -389,7 +393,6 @@ class NERRelationModel(nn.Module):
             
             # 5. Загружаем BERT
             model.bert = bert.to(device)
-            model.bert.load_state_dict(state_dict, strict=False)  # Загружаем только совпадающие ключи
             
             model.eval()
             return model
@@ -506,7 +509,8 @@ class NERELDataset(Dataset):
             truncation=True,
             padding='max_length',
             return_offsets_mapping=True,
-            return_tensors='pt'
+            return_tensors='pt',
+            add_prefix_space=True
         )
         
         # Initialize NER labels (0=O, 1=B-PER, 2=I-PER, 3=B-PROF, 4=I-PROF, 5=B-ORGANIZATION, 6=I-ORGANIZATION, 7=B-FAMILY, 8=I-FAMILY)
@@ -715,7 +719,7 @@ def train_model():
         print(f"Relation Accuracy: {rel_acc:.2%} ({rel_correct}/{rel_total})")
 
     save_dir = "saved_model"
-    model.save_pretrained(save_dir, tokenizer=tokenizer)
+    model.save_pretrained(save_dir, tokenizer=tokenizer, legacy_format=False)
     print(f"Model saved to {save_dir}")
     
     return model, tokenizer
@@ -735,7 +739,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
     # Decode NER with CRF
     mask = attention_mask.bool()
     ner_preds = model.crf.decode(outputs['ner_logits'], mask=mask)[0]
-    tokens = tokenizer.convert_ids_to_tokens(input_ids[0])
+    tokens = tokenizer.convert_ids_to_tokens(input_ids[0], skip_special_tokens=True)
 
     # Extract entities
     entities = []
@@ -909,7 +913,11 @@ if __name__ == "__main__":
 
     # Для загрузки модели
     loaded_model = NERRelationModel.from_pretrained("saved_model")
-    loaded_tokenizer = AutoTokenizer.from_pretrained("saved_model")
+    loaded_tokenizer = AutoTokenizer.from_pretrained(
+        "saved_model",
+        use_fast=True,  # Используем быстрый токенизатор
+        never_split=ENTITY_TYPES.keys()  # Сохраняем обработку сущностей
+    )
     
     # Использование модели
     result = predict("По улице шел красивый человек, его имя было Мефодий. И был он счастлив. Работал этот чувак в яндексе, разработчиком. Или директором. Он пока не определился!", loaded_model, loaded_tokenizer)
