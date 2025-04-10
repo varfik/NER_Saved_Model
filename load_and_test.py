@@ -8,7 +8,7 @@ if __name__ == "__main__":
     loaded_tokenizer = AutoTokenizer.from_pretrained("saved_model")
     
     # Текст для анализа
-    text = "По улице шел красивый человек, его имя было Мефодий. И был он счастлив. Работал этот чувак в яндексе, разработчиком. Или директором. Он пока не определился!"
+    text = input()
     
     # Использование модели
     result = predict(text, loaded_model, loaded_tokenizer)
