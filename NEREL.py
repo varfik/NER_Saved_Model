@@ -96,7 +96,7 @@ class NERRelationModel(nn.Module):
         total_loss = 0
         
         # NER loss
-        if ner_labels:
+        if ner_labels is not None:
             mask = attention_mask.bool()
             ner_loss = -self.crf(ner_logits, ner_labels, mask=mask, reduction='mean')
             total_loss += ner_loss
