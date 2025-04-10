@@ -219,14 +219,9 @@ class NERRelationModel(nn.Module):
                 
                     # Calculate loss for this relation type
                     if rel_probs[rel_type]:
-                        if len(rel_probs[rel_type]) > 0:
-                            # Убедимся, что все тензоры имеют правильную размерность
-                            rel_probs_list = [p.view(-1) if p.dim() == 0 else p for p in rel_probs[rel_type]]
-                            probs_tensor = torch.cat(rel_probs_list).view(-1)
-                        else:
-                            # Если нет примеров для этого типа отношений, пропускаем
-                            continue
-                        targets_tensor = torch.tensor(rel_targets[rel_type], dtype=torch.float, device=device)
+                        min_len = min(len(rel_probs[rel_type]), len(rel_targets[rel_type]))
+                        probs_tensor = torch.cat(rel_probs[rel_type][:min_len]).view(-1)
+                        targets_tensor = torch.tensor(rel_targets[rel_type][:min_len], dtype=torch.float, device=device)
 
                         # Adjust pos_weight based on class imbalance
                         pos_weight = torch.tensor([
@@ -557,7 +552,8 @@ def collate_fn(batch):
         rel_entry = {
             'entities': item['rel_data']['entities'],
             'pairs': torch.tensor(item['rel_data']['pairs'], dtype=torch.long) if item['rel_data']['pairs'] else torch.zeros((0, 2), dtype=torch.long),
-            'labels': torch.tensor(item['rel_data']['labels'], dtype=torch.float) if item['rel_data']['labels'] else torch.zeros(0, dtype=torch.float)
+            'labels': torch.tensor(item['rel_data']['labels'], dtype=torch.long) if item['rel_data']['labels'] else torch.zeros(0, dtype=torch.long),
+            'rel_types': [RELATION_TYPES_INV.get(l, 'UNK') for l in item['rel_data']['labels']] if item['rel_data']['labels'] else []
         }
         rel_data.append(rel_entry)
     
@@ -649,20 +645,26 @@ def train_model():
             if outputs['rel_probs']:
                 for rel_type, probs in outputs['rel_probs'].items():
                     if len(probs) > 0:
+                        # Убедимся, что probs - это тензор
                         if isinstance(probs, list):
-                            probs = torch.cat(probs) if isinstance(probs[0], torch.Tensor) else torch.tensor(probs, device=device)
-                        preds = (torch.sigmoid(probs) > 0.5).long()
-
-                        # Get targets for this relation type
-                        targets = []
-                        for item in batch['rel_data']:
-                            if 'labels' in item:
-                                targets.extend(item['labels'])
+                            probs = torch.cat([p.view(-1) for p in probs if p is not None]) if len(probs) > 0 else torch.tensor([], device=device)
                         
-                        if len(targets) > 0:
-                            targets = torch.tensor(targets[:len(preds)], device=device)
-                            rel_correct += (preds == targets).sum().item()
-                            rel_total += len(targets)
+                        if len(probs) > 0:
+                            preds = (torch.sigmoid(probs) > 0.5).long()
+                            
+                            # Собираем метки для этого типа отношений
+                            targets = []
+                            for item in batch['rel_data']:
+                                if 'labels' in item and len(item['labels']) > 0:
+                                    # Фильтруем метки для текущего типа отношений
+                                    rel_labels = [l for l, t in zip(item['labels'], item.get('rel_types', [])) if t == rel_type]
+                                    targets.extend(rel_labels)
+                            
+                            if len(targets) > 0:
+                                # Обрезаем до минимальной длины
+                                min_len = min(len(preds), len(targets))
+                                rel_correct += (preds[:min_len] == torch.tensor(targets[:min_len], device=device)).sum().item()
+                                rel_total += min_len
 
         # Evaluation metrics
         ner_acc = ner_correct / ner_total if ner_total > 0 else 0
