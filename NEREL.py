@@ -111,7 +111,7 @@ class NERRelationModel(nn.Module):
             rel_total = 0
             # Process each sample in batch
             for batch_idx, sample in enumerate(rel_data):
-                if not sample.get('pairs', []):
+                if 'pairs' not in sample or len(sample['pairs']) == 0
                     continue
                     
                 # Get valid entities
