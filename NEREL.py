@@ -16,6 +16,18 @@ from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
+RELATION_THRESHOLDS = {
+    'WORKS_AS': 0.85,
+    'MEMBER_OF': 0.8,
+    'FOUNDED_BY': 0.8,
+    'SPOUSE': 0.9,
+    'PARENT_OF': 0.85,
+    'SIBLING': 0.9,
+    'PART_OF': 0.7,
+    'WORKPLACE': 0.7,
+    'RELATIVE': 0.75
+}
+
 ENTITY_TYPES = {
     'PERSON': 1,
     'PROFESSION': 2,
@@ -724,8 +736,9 @@ def train_model():
     
     return model, tokenizer
 
-def predict(text, model, tokenizer, device="cuda", relation_threshold=0.75):
+def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
     # Tokenize input with offset mapping
+    relation_threshold = {**RELATION_THRESHOLDS, **(relation_thresholds or {})}
     encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, max_length=512,
         truncation=True)
     
