@@ -74,7 +74,7 @@ class ContextAwareAttention(nn.Module):
         return output, attn_weights
 
 class NERRelationModel(nn.Module):
-    def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=9, num_rel_labels=7):
+    def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=NUM_BIOES_LABELS, num_rel_labels=7):
         super().__init__()
         self.num_ner_labels = num_ner_labels # O, B-PER, I-PER, B-PROF, I-PROF, B-ORG, I-ORG, B-FAM, I-FAM
         self.num_rel_labels = num_rel_labels
@@ -686,92 +686,60 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
     current_entity = None
     entity_id = 0
     
-    for i, (token, pred) in enumerate(zip(tokens, ner_preds)):
+    # Create mapping from label indices to entity types and positions
+    label_to_type = {
+        1: ('PERSON', 'B'), 2: ('PERSON', 'I'), 3: ('PERSON', 'E'), 4: ('PERSON', 'S'),
+        5: ('PROFESSION', 'B'), 6: ('PROFESSION', 'I'), 7: ('PROFESSION', 'E'), 8: ('PROFESSION', 'S'),
+        9: ('ORGANIZATION', 'B'), 10: ('ORGANIZATION', 'I'), 11: ('ORGANIZATION', 'E'), 12: ('ORGANIZATION', 'S'),
+        13: ('FAMILY', 'B'), 14: ('FAMILY', 'I'), 15: ('FAMILY', 'E'), 16: ('FAMILY', 'S')
+    }
+
+    i = 0
+    while i < len(ner_preds):
+        pred = ner_preds[i]
+        token = tokens[i]
+        
         if token in ['[CLS]', '[SEP]', '[PAD]']:
             if current_entity:
                 entities.append(current_entity)
                 current_entity = None
+            i += 1
             continue
-
-        # Combine sub-word tokens starting with '##'
-        if token.startswith('##'):
-            combined_token += token[2:]  # Remove '##' and append to previous token
-        else:
-            if current_entity:
-                current_entity['text'] = combined_token
-                entities.append(current_entity)
-                current_entity = None
-            combined_token = token  # Start new word or entity
             
-        if pred == 1:  # B-PER
-            if current_entity:
-                entities.append(current_entity)
-            current_entity = {
-                'id': f"T{entity_id}",
-                'type': "PERSON",
-                'start': i,
-                'end': i,
-                'token_ids': [i],
-                'text': combined_token
-            }
-            entity_id += 1
-        elif pred == 2:  # I-PER
-            if current_entity and current_entity['type'] == "PERSON":
-                current_entity['end'] = i
-                current_entity['token_ids'].append(i)
-        elif pred == 3:  # B-PROF
-            if current_entity:
-                entities.append(current_entity)
-            current_entity = {
-                'id': f"T{entity_id}",
-                'type': "PROFESSION",
-                'start': i,
-                'end': i,
-                'token_ids': [i],
-                'text': combined_token
-            }
-            entity_id += 1
-        elif pred == 4:  # I-PROF
-            if current_entity and current_entity['type'] == "PROFESSION":
-                current_entity['end'] = i
-                current_entity['token_ids'].append(i)
-        elif pred == 5: # B-ORG
-            if current_entity:
-                entities.append(current_entity)
-            current_entity = {
-                'id': f"T{entity_id}",
-                'type': "ORGANIZATION",
-                'start': i,
-                'end': i,
-                'token_ids': [i],
-                'text': combined_token
-            }
-            entity_id += 1
-        elif pred == 6:  # I-ORG
-            if current_entity and current_entity['type'] == "ORGANIZATION":
-                current_entity['end'] = i
-                current_entity['token_ids'].append(i)
-        elif pred == 7: # B-FAM
-            if current_entity:
-                entities.append(current_entity)
-            current_entity = {
-                'id': f"T{entity_id}",
-                'type': "FAMILY",
-                'start': i,
-                'end': i,
-                'token_ids': [i],
-                'text': combined_token
-            }
-            entity_id += 1
-        elif pred == 8:  # I-FAM
-            if current_entity and current_entity['type'] == "FAMILY":
-                current_entity['end'] = i
-                current_entity['token_ids'].append(i)
-        else:  # O
+        if pred == 0:  # O
             if current_entity:
                 entities.append(current_entity)
                 current_entity = None
-
+            i += 1
+        else:
+            entity_type, position = label_to_type[pred]
+            
+            if position in ['B', 'S']:
+                if current_entity:
+                    entities.append(current_entity)
+                current_entity = {
+                    'id': f"T{entity_id}",
+                    'type': entity_type,
+                    'start': i,
+                    'end': i,
+                    'token_ids': [i],
+                    'text': token.replace('##', '')
+                }
+                entity_id += 1
+                i += 1
+            elif position == 'I':
+                if current_entity and current_entity['type'] == entity_type:
+                    current_entity['end'] = i
+                    current_entity['token_ids'].append(i)
+                i += 1
+            elif position == 'E':
+                if current_entity and current_entity['type'] == entity_type:
+                    current_entity['end'] = i
+                    current_entity['token_ids'].append(i)
+                    entities.append(current_entity)
+                    current_entity = None
+                i += 1
+    
     # Handle the case where the last entity wasn't added
     if current_entity:
         entities.append(current_entity)
