@@ -211,7 +211,7 @@ class NERRelationModel(nn.Module):
                         entity_types=entity_types, 
                         rel_type=rel_type,
                         pos_indices=pos_indices,
-                        ratio=0.5
+                        ratio=1.0
                     )
                     
                     if neg_pairs:
@@ -232,7 +232,7 @@ class NERRelationModel(nn.Module):
                         
                         rel_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(
                             probs_tensor, targets_tensor)
-                        total_loss += rel_loss * 0.5  # Weight relation loss
+                        total_loss += rel_loss * 1.0  # Weight relation loss
 
         return {
             'ner_logits': ner_logits,
@@ -712,108 +712,80 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
                 current_entity = None
             continue
 
-        # Combine sub-word tokens starting with '##'
-        if token.startswith('##'):
-            combined_token += token[2:]  # Remove '##' and append to previous token
-        else:
+        # Get the character offsets for this token
+        token_start, token_end = offset_mapping[i]
+        
+        # Handle entity extraction
+        if pred % 2 == 1:  # Beginning of entity (B- tag)
             if current_entity:
-                current_entity['text'] = combined_token
                 entities.append(current_entity)
-                current_entity = None
-            combined_token = token  # Start new word or entity
             
-        if pred == 1:  # B-PER
+            entity_type = None
+            if pred == 1: entity_type = "PERSON"
+            elif pred == 3: entity_type = "PROFESSION"
+            elif pred == 5: entity_type = "ORGANIZATION"
+            elif pred == 7: entity_type = "FAMILY"
+            
+            if entity_type:
+                current_entity = {
+                    'id': f"T{entity_id}",
+                    'type': entity_type,
+                    'start': i,
+                    'end': i,
+                    'start_char': token_start,
+                    'end_char': token_end,
+                    'token_ids': [i]
+                }
+                entity_id += 1
+                
+        elif pred % 2 == 0 and pred != 0:  # Inside of entity (I- tag)
             if current_entity:
-                entities.append(current_entity)
-            current_entity = {
-                'id': f"T{entity_id}",
-                'type': "PERSON",
-                'start': i,
-                'end': i,
-                'token_ids': [i],
-                'text': combined_token
-            }
-            entity_id += 1
-        elif pred == 2:  # I-PER
-            if current_entity and current_entity['type'] == "PERSON":
-                current_entity['end'] = i
-                current_entity['token_ids'].append(i)
-        elif pred == 3:  # B-PROF
-            if current_entity:
-                entities.append(current_entity)
-            current_entity = {
-                'id': f"T{entity_id}",
-                'type': "PROFESSION",
-                'start': i,
-                'end': i,
-                'token_ids': [i],
-                'text': combined_token
-            }
-            entity_id += 1
-        elif pred == 4:  # I-PROF
-            if current_entity and current_entity['type'] == "PROFESSION":
-                current_entity['end'] = i
-                current_entity['token_ids'].append(i)
-        elif pred == 5: # B-ORG
-            if current_entity:
-                entities.append(current_entity)
-            current_entity = {
-                'id': f"T{entity_id}",
-                'type': "ORGANIZATION",
-                'start': i,
-                'end': i,
-                'token_ids': [i],
-                'text': combined_token
-            }
-            entity_id += 1
-        elif pred == 6:  # I-ORG
-            if current_entity and current_entity['type'] == "ORGANIZATION":
-                current_entity['end'] = i
-                current_entity['token_ids'].append(i)
-        elif pred == 7: # B-FAM
-            if current_entity:
-                entities.append(current_entity)
-            current_entity = {
-                'id': f"T{entity_id}",
-                'type': "FAMILY",
-                'start': i,
-                'end': i,
-                'token_ids': [i],
-                'text': combined_token
-            }
-            entity_id += 1
-        elif pred == 8:  # I-FAM
-            if current_entity and current_entity['type'] == "FAMILY":
-                current_entity['end'] = i
-                current_entity['token_ids'].append(i)
-        else:  # O
+                # Check if this continues the current entity
+                expected_type = None
+                if pred == 2: expected_type = "PERSON"
+                elif pred == 4: expected_type = "PROFESSION"
+                elif pred == 6: expected_type = "ORGANIZATION"
+                elif pred == 8: expected_type = "FAMILY"
+                
+                if expected_type and current_entity['type'] == expected_type:
+                    current_entity['end'] = i
+                    current_entity['end_char'] = token_end
+                    current_entity['token_ids'].append(i)
+                else:
+                    # Type mismatch, save current and start new
+                    entities.append(current_entity)
+                    current_entity = None
+        else:  # O (outside)
             if current_entity:
                 entities.append(current_entity)
                 current_entity = None
-
-    # Handle the case where the last entity wasn't added
+    
+    # Add the last entity if exists
     if current_entity:
         entities.append(current_entity)
 
-    # Convert token positions to character positions
+    # Now get the actual text for each entity
     for entity in entities:
-        start_char = offset_mapping[entity['start']][0]
-        end_char = offset_mapping[entity['end']][1]
-        entity['text'] = text[start_char:end_char]
-        entity['start_char'] = start_char
-        entity['end_char'] = end_char
+        entity['text'] = text[entity['start_char']:entity['end_char']]
+
 
     # Extract relations
     relations = []
     entity_map = {e['id']: e for e in entities}
+
     if len(entities) >= 2:
         sequence_output = model.bert(input_ids, attention_mask).last_hidden_state
 
         # Create entity embeddings
-        entity_embeddings = torch.stack([
-            sequence_output[0, e['start']:e['end']+1].mean(dim=0) 
-            for e in entities
-        ]).to(device)   
+        entity_embeddings = []
+        for e in entities:
+            # Get all token embeddings for this entity
+            token_embeddings = sequence_output[0, e['token_ids']]
+            # Average them
+            entity_embed = token_embeddings.mean(dim=0)
+            entity_embeddings.append(entity_embed)
+        
+        entity_embeddings = torch.stack(entity_embeddings).to(device)
         
         # Build complete graph
         edge_index = torch.tensor([
@@ -823,31 +795,34 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
 
         # Apply GAT
         x = model.gat1(entity_embeddings, edge_index)
-        x = F.relu(x)
+        x = F.elu(x)
+        x = F.dropout(x, p=0.3, training=False)
         x = model.gat2(x, edge_index)
+        x = F.elu(x)
         
         # Predict all possible relations
         for rel_type in RELATION_TYPES:
             for i, e1 in enumerate(entities):
                 for j, e2 in enumerate(entities):
                     if i != j and model._is_valid_pair(e1['type'], e2['type'], rel_type):
-                        pair_features = torch.cat([x[i], x[j]])
+                        # For FOUNDED_BY we need to reverse the direction
+                        if rel_type == 'FOUNDED_BY':
+                            src, tgt = j, i
+                        else:
+                            src, tgt = i, j
+                            
+                        pair_features = torch.cat([x[src], x[tgt]])
                         logit = model.rel_classifiers[rel_type](pair_features)
                         prob = torch.sigmoid(logit).item()
                         
                         if prob > relation_threshold:
-                            # For FOUNDED_BY we reverse the direction
-                            if rel_type == 'FOUNDED_BY':
-                                i, j = j, i  # Organization should be first
-                            
                             relations.append({
                                 'type': rel_type,
-                                'arg1_id': e1['id'],
-                                'arg2_id': e2['id'],
-                                'arg1': e1,
-                                'arg2': e2,
-                                'confidence': prob,
-                                'direction': f"{e1['type']}->{e2['type']}"
+                                'arg1_id': entities[src]['id'],
+                                'arg2_id': entities[tgt]['id'],
+                                'arg1': entities[src],
+                                'arg2': entities[tgt],
+                                'confidence': prob
                             })
     
     # Remove duplicates and keep highest confidence
