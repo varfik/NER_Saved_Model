@@ -196,7 +196,7 @@ class NERRelationModel(nn.Module):
     def _is_valid_pair(self, e1_type, e2_type, rel_type):
         relation_rules = {
             'WORKS_AS': [('PERSON', 'PROFESSION')],
-            'MEMBER_OF': [('PERSON', 'ORGANIZATION')],
+            'MEMBER_OF': [('PERSON', 'ORGANIZATION'), ('ORGANIZATION', 'ORGANIZATION')],
             'FOUNDED_BY': [('ORGANIZATION', 'PERSON')],
             'SPOUSE': [('PERSON', 'PERSON')],
             'PARENT_OF': [('PERSON', 'PERSON'), ('PERSON', 'FAMILY')],
@@ -337,6 +337,8 @@ class NERELDataset(Dataset):
                             if found_pos != -1:
                                 start = found_pos
                                 end = found_pos + len(entity_text)
+                            else:
+                                continue # Пропускать сущности, которые не найдены в тексте
                     
                         entity = {
                             'id': entity_id,
@@ -633,6 +635,16 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
                 entities.append(current_entity)
                 current_entity = None
             continue
+
+        # Combine sub-word tokens starting with '##'
+        if token.startswith('##'):
+            combined_token += token[2:]  # Remove '##' and append to previous token
+        else:
+            if current_entity:
+                current_entity['text'] = combined_token
+                entities.append(current_entity)
+                current_entity = None
+            combined_token = token  # Start new word or entity
             
         if pred == 1:  # B-PER
             if current_entity:
@@ -643,7 +655,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
                 'start': i,
                 'end': i,
                 'token_ids': [i],
-                'text': token.replace('##', '')
+                'text': combined_token
             }
             entity_id += 1
         elif pred == 2:  # I-PER
@@ -659,7 +671,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
                 'start': i,
                 'end': i,
                 'token_ids': [i],
-                'text': token.replace('##', '')
+                'text': combined_token
             }
             entity_id += 1
         elif pred == 4:  # I-PROF
@@ -675,7 +687,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
                 'start': i,
                 'end': i,
                 'token_ids': [i],
-                'text': token.replace('##', '')
+                'text': combined_token
             }
             entity_id += 1
         elif pred == 6:  # I-ORG
@@ -691,7 +703,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
                 'start': i,
                 'end': i,
                 'token_ids': [i],
-                'text': token.replace('##', '')
+                'text': combined_token
             }
             entity_id += 1
         elif pred == 8:  # I-FAM
@@ -702,7 +714,8 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
             if current_entity:
                 entities.append(current_entity)
                 current_entity = None
-    
+
+    # Handle the case where the last entity wasn't added
     if current_entity:
         entities.append(current_entity)
 
@@ -761,7 +774,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
                                 'direction': f"{e1['type']}->{e2['type']}"
                             })
     
-     # Remove duplicates and keep highest confidence
+    # Remove duplicates and keep highest confidence
     unique_relations = {}
     for rel in relations:
         key = (rel['arg1_id'], rel['arg2_id'], rel['type'])
@@ -775,7 +788,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
     return {
         'text': text,
         'entities': entities,
-        'relations': relations
+        'relations': sorted_relations
     }
 
 if __name__ == "__main__":
