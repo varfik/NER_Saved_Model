@@ -200,7 +200,7 @@ class NERRelationModel(nn.Module):
                         if isinstance(label, torch.Tensor):
                             label = label.item()
                         
-                        if label == RELATION_TYPES[rel_type]:
+                        if int(label) == RELATION_TYPES[rel_type]:
                             e1_idx, e2_idx = pair
                             if e1_idx in entity_indices and e2_idx in entity_indices:
                                 i = entity_indices[e1_idx]
