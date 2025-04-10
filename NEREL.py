@@ -33,6 +33,8 @@ RELATION_TYPES = {
 
 }
 
+RELATION_TYPES_INV = {v: k for k, v in RELATION_TYPES.items()}
+
 class NERRelationModel(nn.Module):
     def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=9, num_rel_labels=7):
         super().__init__()
