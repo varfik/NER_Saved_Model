@@ -509,8 +509,7 @@ class NERELDataset(Dataset):
             truncation=True,
             padding='max_length',
             return_offsets_mapping=True,
-            return_tensors='pt',
-            add_prefix_space=True
+            return_tensors='pt'
         )
         
         # Initialize NER labels (0=O, 1=B-PER, 2=I-PER, 3=B-PROF, 4=I-PROF, 5=B-ORGANIZATION, 6=I-ORGANIZATION, 7=B-FAMILY, 8=I-FAMILY)
@@ -719,7 +718,8 @@ def train_model():
         print(f"Relation Accuracy: {rel_acc:.2%} ({rel_correct}/{rel_total})")
 
     save_dir = "saved_model"
-    model.save_pretrained(save_dir, tokenizer=tokenizer, legacy_format=False)
+    tokenizer.save_pretrained(save_dir)
+    model.save_pretrained(save_dir)
     print(f"Model saved to {save_dir}")
     
     return model, tokenizer
@@ -913,11 +913,7 @@ if __name__ == "__main__":
 
     # Для загрузки модели
     loaded_model = NERRelationModel.from_pretrained("saved_model")
-    loaded_tokenizer = AutoTokenizer.from_pretrained(
-        "saved_model",
-        use_fast=True,  # Используем быстрый токенизатор
-        never_split=ENTITY_TYPES.keys()  # Сохраняем обработку сущностей
-    )
+    loaded_tokenizer = AutoTokenizer.from_pretrained("saved_model")
     
     # Использование модели
     result = predict("По улице шел красивый человек, его имя было Мефодий. И был он счастлив. Работал этот чувак в яндексе, разработчиком. Или директором. Он пока не определился!", loaded_model, loaded_tokenizer)
