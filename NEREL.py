@@ -248,7 +248,7 @@ class NERRelationModel(nn.Module):
         }
         return (e1_type, e2_type) in relation_rules.get(rel_type, [])
 
-    def _generate_negative_examples(self, entity_embeddings, entity_types, rel_type, ratio=0.5):
+    def _generate_negative_examples(self, entity_embeddings, entity_types, rel_type,  pos_indices=None, ratio=0.5):
         """Generate valid negative examples for specific relation type"""
         device = entity_embeddings.device
         neg_probs = []
