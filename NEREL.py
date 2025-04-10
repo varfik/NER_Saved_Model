@@ -194,29 +194,21 @@ class NERRelationModel(nn.Module):
                     pos_count = 0
                     
                     # Collect positive examples
-                    for pair, label in zip(sample['pairs'], sample['labels']):
-                        if isinstance(pair, torch.Tensor):
-                            pair = pair.tolist()
-                        if isinstance(label, torch.Tensor):
-                            label = label.item()
-                        
-                        if int(label) == RELATION_TYPES[rel_type]:
-                            e1_idx, e2_idx = pair
+                    for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
+                        if label == RELATION_TYPES[rel_type]:
                             if e1_idx in entity_indices and e2_idx in entity_indices:
                                 i = entity_indices[e1_idx]
                                 j = entity_indices[e2_idx]
-                                e1_type = valid_entities[i]['type']
-                                e2_type = valid_entities[j]['type']
-
-                                if self._is_valid_pair(e1_type, e2_type, rel_type):
-                                    if rel_type == 'FOUNDED_BY':
-                                        i, j = j, i
-                                    
-                                    pair_features = torch.cat([x[i], x[j]])
-                                    rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
-                                    rel_targets[rel_type].append(1.0)
-                                    pos_indices.add((i, j))
-                                    pos_count += 1
+                                
+                                # Для FOUNDED_BY меняем направление
+                                if rel_type == 'FOUNDED_BY':
+                                    i, j = j, i
+                                
+                                pair_features = torch.cat([x[i], x[j]])
+                                rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
+                                rel_targets[rel_type].append(1.0)
+                                pos_indices.add((i, j))
+                                pos_count += 1
                     print(f"Тип отношения {rel_type}: найдено {pos_count} положительных примеров")
                     
                     # Generate negative examples for this relation type
@@ -268,17 +260,6 @@ class NERRelationModel(nn.Module):
             'loss': total_loss if total_loss != 0 else None
         }
 
-    def _is_valid_pair(self, e1_type, e2_type, rel_type):
-        relation_rules = {
-            'WORKS_AS': [('PERSON', 'PROFESSION')],
-            'MEMBER_OF': [('PERSON', 'ORGANIZATION'), ('ORGANIZATION', 'ORGANIZATION')],
-            'FOUNDED_BY': [('ORGANIZATION', 'PERSON')],
-            'SPOUSE': [('PERSON', 'PERSON')],
-            'PARENT_OF': [('PERSON', 'PERSON'), ('PERSON', 'FAMILY')],
-            'SIBLING': [('PERSON', 'PERSON')]
-        }
-        return (e1_type, e2_type) in relation_rules.get(rel_type, [])
-
     def _generate_negative_examples(self, entity_embeddings, entity_types, rel_type,  pos_indices=None, ratio=0.5):
         """Generate valid negative examples for specific relation type"""
         device = entity_embeddings.device
@@ -288,107 +269,32 @@ class NERRelationModel(nn.Module):
         if pos_indices is None:
             pos_indices = set()
         
-        # Collect all possible valid pairs for this relation type
-        possible_pairs = []
-        for i, e1_type in enumerate(entity_types):
-            for j, e2_type in enumerate(entity_types):
-                if i == j:
-                    continue
-                if (i, j) in pos_indices or (j, i) in pos_indices:
-                    continue
-                if self._is_valid_pair(e1_type, e2_type, rel_type):
-                    possible_pairs.append((i, j))
-
-        print(f"Всего возможных валидный пар: {len(possible_pairs)}")
+        # Генерируем все возможные пары кроме положительных
+        all_pairs = [
+            (i, j) for i in range(len(entity_types))
+            for j in range(len(entity_types))
+            if i != j and (i, j) not in pos_indices
+        ]
         
-        # For symmetric relations, we need to consider both directions
+        # Для симметричных отношений учитываем только уникальные пары
         if rel_type in ['SPOUSE', 'SIBLING']:
-            possible_pairs = list(set(
-                (min(i, j), max(i, j)) 
-                for i, j in possible_pairs
-            ))
-            print(f"Уникальные пары после обработки симметричных отношений: {len(possible_pairs)}")
-
-
-         # 3. Стратегия выборки:
-        # - 50% случайных пар
-        # - 30% "сложных" пар (близкие по эмбеддингам)
-        # - 20% пар с похожими типами сущностей
+            all_pairs = list({(min(i,j), max(i,j)) for i,j in all_pairs})
         
-        num_random = max(1, int(len(possible_pairs) * ratio * 0.5))
-        num_hard = max(1, int(len(possible_pairs) * ratio * 0.3))
-        num_type = max(1, int(len(possible_pairs) * ratio * 0.2))
-
-        # 3.1 Случайные отрицательные примеры
-        if len(possible_pairs) > num_random:
-            sampled_random = random.sample(possible_pairs, num_random)
-        else:
-            sampled_random = possible_pairs
+        # Выбираем случайное подмножество
+        num_samples = min(len(all_pairs), int(len(all_pairs) * ratio))
+        sampled_pairs = random.sample(all_pairs, num_samples) if all_pairs else []
         
-        print(f"Выбрано случайных пар: {len(sampled_random)}")
-
-        # 3.2 "Сложные" отрицательные примеры (близкие в пространстве эмбеддингов)
-        if len(possible_pairs) > 1:
-            # Вычисляем попарные расстояния
-            with torch.no_grad():
-                all_embs = entity_embeddings.cpu().numpy()
-                distances = np.zeros((len(all_embs), len(all_embs)))
-                
-                for i in range(len(all_embs)):
-                    for j in range(len(all_embs)):
-                        if i != j:
-                            distances[i,j] = np.linalg.norm(all_embs[i] - all_embs[j])
-            
-            # Выбираем пары с минимальными расстояниями
-            flat_indices = np.argpartition(distances.ravel(), num_hard)[:num_hard]
-            hard_pairs = [np.unravel_index(i, distances.shape) for i in flat_indices]
-            hard_pairs = [(i,j) for i,j in hard_pairs if i != j and (i,j) in possible_pairs]
-            
-            if len(hard_pairs) > num_hard:
-                hard_pairs = random.sample(hard_pairs, num_hard)
-        else:
-            hard_pairs = []
-        
-        print(f"Выбрано сложных пар: {len(hard_pairs)}")
-
-        # 3.3 Пары с похожими типами сущностей
-        type_pairs = []
-        type_counts = defaultdict(int)
-        
-        for i, j in possible_pairs:
-            key = (entity_types[i], entity_types[j])
-            if type_counts[key] < num_type // len(ENTITY_TYPES)**2:
-                type_pairs.append((i,j))
-                type_counts[key] += 1
-        
-        if len(type_pairs) > num_type:
-            type_pairs = random.sample(type_pairs, num_type)
-        
-        print(f"Выбрано пар по типам: {len(type_pairs)}")
-
-        # Объединяем все стратегии
-        all_neg_pairs = list(set(sampled_random + hard_pairs + type_pairs))
-        print(f"Всего отрицательных пар после объединения: {len(all_neg_pairs)}")
-
-        # 4. Создаем примеры
-        for i, j in all_neg_pairs:
-            # Для FOUNDED_BY нужно обратить направление
+        for i, j in sampled_pairs:
+            # Для FOUNDED_BY меняем направление
             if rel_type == 'FOUNDED_BY':
                 i, j = j, i
             
             pair_features = torch.cat([entity_embeddings[i], entity_embeddings[j]])
             neg_probs.append(self.rel_classifiers[rel_type](pair_features))
             neg_targets.append(0.0)
-            
-            # Отладочная информация
-            if random.random() < 0.1:  # Выводим 10% примеров для проверки
-                print(f"Отрицательный пример: {entity_types[i]} -> {entity_types[j]}")
-
+    
         if neg_probs:
-            print(f"Сгенерировано отрицательных примеров для {rel_type}: {len(neg_probs)}")
             return torch.stack(neg_probs).view(-1, 1), torch.tensor(neg_targets, device=device)
-        
-        print(f"Не удалось сгенерировать отрицательные примеры для {rel_type}")
         return None
 
     def save_pretrained(self, save_dir, tokenizer=None):
@@ -921,7 +827,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.3):
         for rel_type in RELATION_TYPES:
             for i, e1 in enumerate(entities):
                 for j, e2 in enumerate(entities):
-                    if i != j and model._is_valid_pair(e1['type'], e2['type'], rel_type):
+                    if i != j:
                         # For FOUNDED_BY we need to reverse the direction
                         if rel_type == 'FOUNDED_BY':
                             src, tgt = j, i
