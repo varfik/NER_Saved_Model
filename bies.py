@@ -200,12 +200,9 @@ class NERRelationModel(nn.Module):
                 for rel_type in RELATION_TYPES:
                     rel_probs[rel_type] = []
                     rel_targets[rel_type] = []
-                    
-                    # Create entity index map
-                    entity_indices = {e['id']: i for i, e in enumerate(valid_entities)}
-                    
-                    pos_indices = set((e1_idx, e2_idx) for (e1_idx, e2_idx) in sample['pairs'])
-                    # Process each pair
+
+                    # Process positive pairs first
+                    pos_pairs = 0
                     for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
                         if e1_idx in entity_indices and e2_idx in entity_indices:
                             i = entity_indices[e1_idx]
@@ -217,25 +214,40 @@ class NERRelationModel(nn.Module):
                                 pair_features = torch.cat([x[i], x[j]])
                                 rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
                                 rel_targets[rel_type].append(label)
+                                pos_pairs += 1
+
+                    # Generate balanced negative examples
+                    neg_pairs = min(pos_pairs * 3, len(valid_entities)**2 - pos_pairs)  # Max 3:1 ratio
+                    neg_count = 0
                     
-                    # Process negative pairs    
-                    for i, e1 in enumerate(valid_entities):
-                        for j, e2 in enumerate(valid_entities):
-                            if i == j:
-                                continue
-                            if (e1['id'], e2['id']) in pos_indices:
-                                continue
-                            if self._is_valid_pair(e1['type'], e2['type'], rel_type):
-                                pair_features = torch.cat([x[i], x[j]])
-                                rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
-                                rel_targets[rel_type].append(0.0)
+                    # Shuffle all possible negative pairs
+                    all_pairs = [(i,j) for i in range(len(valid_entities)) 
+                                for j in range(len(valid_entities)) if i != j]
+                    random.shuffle(all_pairs)
+                    
+                    for i, j in all_pairs:
+                        if neg_count >= neg_pairs:
+                            break
+                        e1 = valid_entities[i]
+                        e2 = valid_entities[j]
+                        if (e1['id'], e2['id']) not in pos_indices and self._is_valid_pair(e1['type'], e2['type'], rel_type):
+                            pair_features = torch.cat([x[i], x[j]])
+                            rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
+                            rel_targets[rel_type].append(0.0)
+                            neg_count += 1
                     
                     if rel_probs[rel_type]:
                         probs_tensor = torch.cat(rel_probs[rel_type]).view(-1)
                         targets_tensor = torch.tensor(rel_targets[rel_type], dtype=torch.float, device=device)
 
-                        rel_loss = nn.BCEWithLogitsLoss()(probs_tensor, targets_tensor)
-                        total_loss += rel_loss
+                        # Ensure same length
+                        min_len = min(len(probs_tensor), len(targets_tensor))
+                        if min_len > 0:
+                            rel_loss = nn.BCEWithLogitsLoss()(
+                                probs_tensor[:min_len], 
+                                targets_tensor[:min_len]
+                            )
+                            total_loss += rel_loss
 
         return {
             'ner_logits': ner_logits,
@@ -633,20 +645,18 @@ def train_model():
             if outputs['rel_probs']:
                 for rel_type, probs in outputs['rel_probs'].items():
                     if len(probs) > 0:
-                        if isinstance(probs, list):
-                            probs = torch.cat(probs) if isinstance(probs[0], torch.Tensor) else torch.tensor(probs, device=device)
-                        preds = (torch.sigmoid(probs) > 0.5).long()
+                         # Get predictions and targets for this relation type only
+                        probs_tensor = torch.cat(probs).view(-1)
+                        preds = (torch.sigmoid(probs_tensor) > 0.5).long()
 
-                        # Get targets for this relation type
-                        targets = []
-                        for item in batch['rel_data']:
-                            if 'labels' in item:
-                                targets.extend(item['labels'])
+                        # Get corresponding targets
+                        targets_tensor = torch.tensor(rel_targets[rel_type], dtype=torch.float, device=device)
                         
-                        if len(targets) > 0:
-                            targets = torch.tensor(targets[:len(preds)], device=device)
-                            rel_correct += (preds == targets).sum().item()
-                            rel_total += len(targets)
+                        # Ensure same length
+                        min_len = min(len(preds), len(targets_tensor))
+                        if min_len > 0:
+                            rel_correct += (preds[:min_len] == targets_tensor[:min_len]).sum().item()
+                            rel_total += min_len
 
         # Evaluation metrics
         ner_acc = ner_correct / ner_total if ner_total > 0 else 0
