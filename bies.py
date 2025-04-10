@@ -200,7 +200,7 @@ class NERRelationModel(nn.Module):
                 for rel_type in RELATION_TYPES:
                     rel_probs[rel_type] = []
                     rel_targets[rel_type] = []
-
+                    entity_indices = {e['id']: i for i, e in enumerate(valid_entities)}
                     # Process positive pairs first
                     pos_pairs = 0
                     for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
