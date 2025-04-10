@@ -96,7 +96,7 @@ class NERRelationModel(nn.Module):
         total_loss = 0
         
         # NER loss
-        if ner_labels is not None:
+        if ner_labels:
             mask = attention_mask.bool()
             ner_loss = -self.crf(ner_logits, ner_labels, mask=mask, reduction='mean')
             total_loss += ner_loss
@@ -106,6 +106,9 @@ class NERRelationModel(nn.Module):
         rel_targets = {}
 
         if rel_data and self.training:
+            total_rel_loss = 0
+            rel_correct = 0
+            rel_total = 0
             # Process each sample in batch
             for batch_idx, sample in enumerate(rel_data):
                 if not sample.get('pairs', []):
@@ -150,6 +153,7 @@ class NERRelationModel(nn.Module):
                     # Create entity index map
                     entity_indices = {e['id']: i for i, e in enumerate(valid_entities)}
                     
+                    pos_indices = set((e1_idx, e2_idx) for (e1_idx, e2_idx) in sample['pairs'])
                     # Process each pair
                     for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
                         if e1_idx in entity_indices and e2_idx in entity_indices:
@@ -162,28 +166,25 @@ class NERRelationModel(nn.Module):
                                 pair_features = torch.cat([x[i], x[j]])
                                 rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
                                 rel_targets[rel_type].append(label)
+
+                    for i, e1 in enumerate(valid_entities):
+                        for j, e2 in enumerate(valid_entities):
+                            if i == j:
+                                continue
+                            if (e1['id'], e2['id']) in pos_indices:
+                                continue
+                            if self._is_valid_pair(e1['type'], e2['type'], rel_type):
+                                pair_features = torch.cat([x[i], x[j]])
+                                rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
+                                rel_targets[rel_type].append(0.0)
                     
-                    # Add negative examples
                     if rel_probs[rel_type]:
-                        # Convert to tensors
-                        pos_probs = torch.cat(rel_probs[rel_type]).view(-1)
-                        pos_targets = torch.tensor(rel_targets[rel_type], dtype=torch.float, device=device)
-                        
-                        # Generate negative examples
-                        neg_probs, neg_targets = self._generate_negative_examples(
-                            x, [e['type'] for e in valid_entities], rel_type)
-                        
-                        if len(neg_probs) > 0:
-                            all_probs = torch.cat([pos_probs, neg_probs])
-                            all_targets = torch.cat([pos_targets, neg_targets])
-                        else:
-                            all_probs = pos_probs
-                            all_targets = pos_targets
-                        
-                        # Calculate loss
-                        pos_weight = torch.tensor([2.0], device=device)  # Weight positive examples more
+                        probs_tensor = torch.cat(rel_probs[rel_type]).view(-1)
+                        targets_tensor = torch.tensor(rel_targets[rel_type], dtype=torch.float, device=device)
+
+                        pos_weight = torch.tensor([2.0], device=device)  # можно скорректировать
                         rel_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(
-                            all_probs, all_targets)
+                            probs_tensor, targets_tensor)
                         total_loss += rel_loss
 
         return {
@@ -214,10 +215,7 @@ class NERRelationModel(nn.Module):
             for j, e2_type in enumerate(entity_types):
                 if i != j and self._is_valid_pair(e1_type, e2_type, rel_type):
                     possible_pairs.append((i, j))
-        
-        if not possible_pairs:
-            return torch.tensor([], device=device), torch.tensor([], device=device)
-        
+
         # Выбираем случайное подмножество пар в качестве отрицательных примеров
         num_neg = max(1, int(len(possible_pairs) * ratio))
         sampled_pairs = random.sample(possible_pairs, min(num_neg, len(possible_pairs)))
@@ -484,8 +482,8 @@ def collate_fn(batch):
     for item in batch:
         rel_entry = {
             'entities': item['rel_data']['entities'],
-            'pairs': item['rel_data']['pairs'],
-            'labels': item['rel_data']['labels'],  # Keep as list for now
+            'pairs': torch.tensor(item['rel_data']['pairs'], dtype=torch.long) if item['rel_data']['pairs'] else torch.zeros((0, 2), dtype=torch.long),
+            'labels': torch.tensor(item['rel_data']['labels'], dtype=torch.float) if item['rel_data']['labels'] else torch.zeros(0, dtype=torch.float)
         }
         rel_data.append(rel_entry)
     
