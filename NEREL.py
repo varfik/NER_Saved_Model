@@ -637,6 +637,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
             if current_entity:
                 entities.append(current_entity)
             current_entity = {
+                'id': f"T{entity_id}",
                 'type': "PERSON",
                 'start': i,
                 'end': i,
@@ -652,6 +653,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
             if current_entity:
                 entities.append(current_entity)
             current_entity = {
+                'id': f"T{entity_id}",
                 'type': "PROFESSION",
                 'start': i,
                 'end': i,
@@ -667,6 +669,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
             if current_entity:
                 entities.append(current_entity)
             current_entity = {
+                'id': f"T{entity_id}",
                 'type': "ORGANIZATION",
                 'start': i,
                 'end': i,
@@ -682,6 +685,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
             if current_entity:
                 entities.append(current_entity)
             current_entity = {
+                'id': f"T{entity_id}",
                 'type': "FAMILY",
                 'start': i,
                 'end': i,
