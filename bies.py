@@ -249,6 +249,10 @@ class NERRelationModel(nn.Module):
                             )
                             total_loss += rel_loss
 
+                        preds = (torch.sigmoid(probs_tensor) > 0.5).float()
+                        rel_correct += (preds == targets_tensor).sum().item()
+                        rel_total += targets_tensor.size(0)
+
         return {
             'ner_logits': ner_logits,
             'rel_probs': rel_probs,
@@ -264,6 +268,7 @@ class NERRelationModel(nn.Module):
             'PARENT_OF': [('PERSON', 'PERSON'), ('PERSON', 'FAMILY')],
             'SIBLING': [('PERSON', 'PERSON')]
         }
+        print(f"VALID: {e1_type} -> {e2_type} for {rel_type}")
         return (e1_type, e2_type) in relation_rules.get(rel_type, [])
 
     def _generate_negative_examples(self, entity_embeddings, entity_types, rel_type, ratio=0.5):
