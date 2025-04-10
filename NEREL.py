@@ -20,7 +20,8 @@ ENTITY_TYPES = {
     'PERSON': 1,
     'PROFESSION': 2,
     'ORGANIZATION': 3,
-    'FAMILY': 4
+    'FAMILY': 4,
+    'LOCATION': 5
 }
 
 RELATION_TYPES = {
@@ -29,7 +30,10 @@ RELATION_TYPES = {
     'FOUNDED_BY': 3,
     'SPOUSE': 4,
     'PARENT_OF': 5,
-    'SIBLING': 6
+    'SIBLING': 6,
+    'PART_OF': 7,    
+    'WORKPLACE': 8,     
+    'RELATIVE': 9      
 
 }
 
@@ -80,7 +84,10 @@ class NERRelationModel(nn.Module):
             'FOUNDED_BY': self._build_relation_classifier(input_dim=64*2, hidden_dim=256),
             'SPOUSE': self._build_symmetric_classifier(input_dim=64*2, hidden_dim=256),
             'PARENT_OF': self._build_relation_classifier(input_dim=64*2, hidden_dim=256),
-            'SIBLING': self._build_symmetric_classifier(input_dim=64*2, hidden_dim=256)
+            'SIBLING': self._build_symmetric_classifier(input_dim=64*2, hidden_dim=256),
+            'PART_OF': self._build_relation_classifier(input_dim=64*2, hidden_dim=256),    
+            'WORKPLACE': self._build_relation_classifier(input_dim=64*2, hidden_dim=256),    
+            'RELATIVE': self._build_symmetric_classifier(input_dim=64*2, hidden_dim=256) 
         })
 
         self._init_weights()
@@ -434,7 +441,7 @@ class NERELDataset(Dataset):
                     entity_type = type_and_span[0]
 
                     # Поддерживаемые типы сущностей
-                    if entity_type in ['PERSON', 'PROFESSION', 'ORGANIZATION', 'FAMILY']:
+                    if entity_type in ENTITY_TYPES:
                         start = int(type_and_span[1])
                         end = int(type_and_span[-1])
                         entity_text = parts[2]
@@ -531,6 +538,9 @@ class NERELDataset(Dataset):
                 elif entity['type'] == 'FAMILY':
                     ner_labels[start_token] = 7  # B-FAM
                     ner_labels[start_token+1:end_token+1] = 8  # I-FAM
+                elif entity['type'] == 'LOCATION':
+                    ner_labels[start_token] = 9  # B-LOC
+                    ner_labels[start_token+1:end_token+1] = 10  # I-LOC
 
                 token_entities.append({
                     'start': start_token,
@@ -709,7 +719,7 @@ def train_model():
     
     return model, tokenizer
 
-def predict(text, model, tokenizer, device="cuda", relation_threshold=0.3):
+def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
     # Tokenize input with offset mapping
     encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, max_length=512,
         truncation=True)
@@ -751,6 +761,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.3):
             elif pred == 3: entity_type = "PROFESSION"
             elif pred == 5: entity_type = "ORGANIZATION"
             elif pred == 7: entity_type = "FAMILY"
+            elif pred == 9: entity_type = "LOCATION"
             
             if entity_type:
                 current_entity = {
@@ -772,6 +783,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.3):
                 elif pred == 4: expected_type = "PROFESSION"
                 elif pred == 6: expected_type = "ORGANIZATION"
                 elif pred == 8: expected_type = "FAMILY"
+                elif pred == 10: expected_type = "LOCATION"
                 
                 if expected_type and current_entity['type'] == expected_type:
                     current_entity['end'] = i
@@ -800,7 +812,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=0.3):
             'entities': entities,
             'relations': []
         }
-        
+
     # Extract relations
     relations = []
     entity_map = {e['id']: e for e in entities}
