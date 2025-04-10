@@ -700,7 +700,9 @@ def train_model():
     {'params': model.bert.parameters(), 'lr': 3e-5},
     {'params': model.ner_classifier.parameters(), 'lr': 5e-5},
     {'params': model.crf.parameters(), 'lr': 5e-5},
-    {'params': model.relation_head.parameters(), 'lr': 1e-4}
+    {'params': model.gat1.parameters(), 'lr': 1e-3},
+    {'params': model.gat2.parameters(), 'lr': 1e-3},
+    {'params': model.rel_classifiers.parameters(), 'lr': 1e-3}
 ])
     
     # Training loop
