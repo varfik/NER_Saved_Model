@@ -191,10 +191,17 @@ class NERRelationModel(nn.Module):
                     rel_probs[rel_type] = []
                     rel_targets[rel_type] = []
                     pos_indices = set()
+                    pos_count = 0
                     
-                    # Collect positive examples for this relation type
-                    for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
+                    # Collect positive examples
+                    for pair, label in zip(sample['pairs'], sample['labels']):
+                        if isinstance(pair, torch.Tensor):
+                            pair = pair.tolist()
+                        if isinstance(label, torch.Tensor):
+                            label = label.item()
+                        
                         if label == RELATION_TYPES[rel_type]:
+                            e1_idx, e2_idx = pair
                             if e1_idx in entity_indices and e2_idx in entity_indices:
                                 i = entity_indices[e1_idx]
                                 j = entity_indices[e2_idx]
@@ -202,7 +209,6 @@ class NERRelationModel(nn.Module):
                                 e2_type = valid_entities[j]['type']
 
                                 if self._is_valid_pair(e1_type, e2_type, rel_type):
-                                    # For FOUNDED_BY, we need to reverse the direction
                                     if rel_type == 'FOUNDED_BY':
                                         i, j = j, i
                                     
@@ -210,6 +216,7 @@ class NERRelationModel(nn.Module):
                                     rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
                                     rel_targets[rel_type].append(1.0)
                                     pos_indices.add((i, j))
+                                    pos_count += 1
                     print(f"Тип отношения {rel_type}: найдено {pos_count} положительных примеров")
                     
                     # Generate negative examples for this relation type
@@ -253,6 +260,8 @@ class NERRelationModel(nn.Module):
                         
                         print(f"Отношение {rel_type}: loss={rel_loss.item():.4f}, accuracy={accuracy:.2%}, "
                             f"pos/neg={sum(targets_tensor)}/{len(targets_tensor)-sum(targets_tensor)}")
+
+        
         return {
             'ner_logits': ner_logits,
             'rel_probs': rel_probs,
