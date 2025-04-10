@@ -234,8 +234,7 @@ class NERRelationModel(nn.Module):
                         probs_tensor = torch.cat(rel_probs[rel_type]).view(-1)
                         targets_tensor = torch.tensor(rel_targets[rel_type], dtype=torch.float, device=device)
 
-                        rel_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(
-                            probs_tensor, targets_tensor)
+                        rel_loss = nn.BCEWithLogitsLoss()(probs_tensor, targets_tensor)
                         total_loss += rel_loss
 
         return {
