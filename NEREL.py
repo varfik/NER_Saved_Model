@@ -186,29 +186,79 @@ class NERRelationModel(nn.Module):
                 # Create entity index map
                 entity_indices = {e['id']: i for i, e in enumerate(valid_entities)}
                 
-                # Process each relation type separately
+
+                for rel_type in RELATION_TYPES:
+    rel_probs[rel_type] = []
+    rel_targets[rel_type] = []
+    pos_indices = set()
+    pos_count = 0
+    
+    # Collect positive examples
+    for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
+        if label == RELATION_TYPES[rel_type]:
+            if e1_idx in entity_indices and e2_idx in entity_indices:
+                i = entity_indices[e1_idx]
+                j = entity_indices[e2_idx]
+                
+                # Для FOUNDED_BY меняем направление
+                if rel_type == 'FOUNDED_BY':
+                    i, j = j, i
+                
+                pair_features = torch.cat([x[i], x[j]])
+                rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
+                rel_targets[rel_type].append(1.0)
+                pos_indices.add((i, j))
+                pos_count += 1
+
+                # With this improved version:
                 for rel_type in RELATION_TYPES:
                     rel_probs[rel_type] = []
                     rel_targets[rel_type] = []
                     pos_indices = set()
                     pos_count = 0
                     
-                    # Collect positive examples
-                    for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
-                        if label == RELATION_TYPES[rel_type]:
+                    # Get all pairs and labels for this sample
+                    sample_pairs = sample['pairs'].cpu().numpy() if isinstance(sample['pairs'], torch.Tensor) else sample['pairs']
+                    sample_labels = sample['labels'].cpu().numpy() if isinstance(sample['labels'], torch.Tensor) else sample['labels']
+                    
+                    # Collect positive examples for this relation type
+                    for pair_idx, (e1_idx, e2_idx) in enumerate(sample_pairs):
+                        if sample_labels[pair_idx] == RELATION_TYPES[rel_type]:
                             if e1_idx in entity_indices and e2_idx in entity_indices:
                                 i = entity_indices[e1_idx]
                                 j = entity_indices[e2_idx]
                                 
-                                # Для FOUNDED_BY меняем направление
+                                # Handle direction for specific relations
                                 if rel_type == 'FOUNDED_BY':
-                                    i, j = j, i
+                                    i, j = j, i  # Reverse direction
                                 
-                                pair_features = torch.cat([x[i], x[j]])
-                                rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
-                                rel_targets[rel_type].append(1.0)
-                                pos_indices.add((i, j))
-                                pos_count += 1
+                                # Get entity types for validation
+                                e1_type = entity_types[i]
+                                e2_type = entity_types[j]
+                                
+                                # Validate entity types for this relation
+                                valid = False
+                                if rel_type == 'WORKS_AS' and e1_type == 'PERSON' and e2_type == 'PROFESSION':
+                                    valid = True
+                                elif rel_type == 'MEMBER_OF' and e1_type == 'PERSON' and e2_type == 'ORGANIZATION':
+                                    valid = True
+                                elif rel_type == 'FOUNDED_BY' and e1_type == 'ORGANIZATION' and e2_type == 'PERSON':
+                                    valid = True
+                                elif rel_type in ['SPOUSE', 'SIBLING'] and e1_type == 'PERSON' and e2_type == 'PERSON':
+                                    valid = True
+                                elif rel_type == 'PARENT_OF' and (
+                                    (e1_type == 'PERSON' and e2_type == 'PERSON') or 
+                                    (e1_type == 'PERSON' and e2_type == 'FAMILY')
+                                ):
+                                    valid = True
+                                
+                                if valid:
+                                    pair_features = torch.cat([x[i], x[j]])
+                                    rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
+                                    rel_targets[rel_type].append(1.0)
+                                    pos_indices.add((i, j))
+                                    pos_count += 1
+
                     print(f"Тип отношения {rel_type}: найдено {pos_count} положительных примеров")
                     
                     # Generate negative examples for this relation type
