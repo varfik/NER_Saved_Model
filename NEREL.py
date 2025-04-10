@@ -724,7 +724,7 @@ def train_model():
     
     return model, tokenizer
 
-def predict(text, model, tokenizer, device="cuda", relation_threshold=0.5):
+def predict(text, model, tokenizer, device="cuda", relation_threshold=0.75):
     # Tokenize input with offset mapping
     encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, max_length=512,
         truncation=True)
