@@ -205,7 +205,9 @@ class NERRelationModel(nn.Module):
 
                     # Generate negative examples for this relation type
                     neg_pairs = self._generate_negative_examples(
-                        x, entity_types, rel_type, 
+                        entity_embeddings=x, 
+                        entity_types=entity_types, 
+                        rel_type=rel_type,
                         pos_indices=pos_indices,
                         ratio=0.5
                     )
@@ -251,6 +253,9 @@ class NERRelationModel(nn.Module):
         device = entity_embeddings.device
         neg_probs = []
         neg_targets = []
+        
+        if pos_indices is None:
+            pos_indices = set()
         
         # Collect all possible valid pairs for this relation type
         possible_pairs = []
