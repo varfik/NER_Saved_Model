@@ -40,9 +40,10 @@ RELATION_TYPES = {
 RELATION_TYPES_INV = {v: k for k, v in RELATION_TYPES.items()}
 
 class NERRelationModel(nn.Module):
-    def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=9, num_rel_labels=7):
+    def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=11, num_rel_labels=9):
         super().__init__()
-        self.num_ner_labels = num_ner_labels # O, B-PER, I-PER, B-PROF, I-PROF, B-ORG, I-ORG, B-FAM, I-FAM
+        # Initialize NER labels (0=O, 1=B-PER, 2=I-PER, ..., 9=B-LOC, 10=I-LOC)
+        self.num_ner_labels = num_ner_labels 
         self.num_rel_labels = num_rel_labels
         
         # BERT encoder
