@@ -653,7 +653,7 @@ def train_model():
     # Training loop
     best_ner_f1 = 0
     # Цикл обучения
-    for epoch in range(3):
+    for epoch in range(10):
         model.train()
         epoch_loss = 0
         ner_correct = ner_total = 0
