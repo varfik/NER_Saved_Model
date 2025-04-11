@@ -319,7 +319,7 @@ class NERRelationModel(nn.Module):
         valid_pairs = [p for p in valid_pairs if p not in pos_indices]
         
         # Sample negative examples
-        num_samples = min(len(valid_pairs), max(5 * len(pos_indices), 10))
+        num_samples = min(len(valid_pairs), max(10 * len(pos_indices), 20))
         sampled_pairs = random.sample(valid_pairs, num_samples) if valid_pairs else []
         
         for i, j in sampled_pairs:
@@ -635,25 +635,25 @@ def train_model():
     sample_weights = []
     for sample in train_dataset:
         has_relations = len(sample['rel_data']['labels']) > 0
-        sample_weights.append(1.0 if has_relations else 0.3)
+        sample_weights.append(3.0 if has_relations else 1.0)
     
     sampler = WeightedRandomSampler(sample_weights, len(train_dataset), replacement=True)
     train_loader = DataLoader(train_dataset, batch_size=8, collate_fn=collate_fn, sampler=sampler)
 
     # Optimizer with different learning rates
     optimizer = AdamW([
-    {'params': model.bert.parameters(), 'lr': 2e-5},
+    {'params': model.bert.parameters(), 'lr': 1e-5},
     {'params': model.ner_classifier.parameters(), 'lr': 1e-4},
     {'params': model.crf.parameters(), 'lr': 1e-4},
-    {'params': model.gat1.parameters(), 'lr': 5e-4},
-    {'params': model.gat2.parameters(), 'lr': 5e-4},
+    {'params': model.gat1.parameters(), 'lr': 3e-4},
+    {'params': model.gat2.parameters(), 'lr': 3e-4},
     {'params': model.rel_classifiers.parameters(), 'lr': 5e-4}
     ], weight_decay=1e-5)
     
     # Training loop
     best_ner_f1 = 0
     # Цикл обучения
-    for epoch in range(10):
+    for epoch in range(3):
         model.train()
         epoch_loss = 0
         ner_correct = ner_total = 0
