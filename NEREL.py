@@ -209,9 +209,8 @@ class NERRelationModel(nn.Module):
                         if abs(e1['start'] - e2['start']) > 80:
                             continue 
 
-
                         for rel_type, pairs in VALID_COMB.items():
-                            if (e1['type'], e2['type'] in pairs):
+                            if (e1['type'], e2['type']) in pairs:
                                 valid_pairs.append((i, j, rel_type))
                                 break
 
