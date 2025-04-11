@@ -17,15 +17,15 @@ from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
 RELATION_THRESHOLDS = {
-    'WORKS_AS': 0.85,
+    'WORKS_AS': 0.8,
     'MEMBER_OF': 0.8,
     'FOUNDED_BY': 0.8,
-    'SPOUSE': 0.9,
-    'PARENT_OF': 0.85,
-    'SIBLING': 0.9,
+    'SPOUSE': 0.5,
+    'PARENT_OF': 0.5,
+    'SIBLING': 0.5,
     'PART_OF': 0.7,
-    'WORKPLACE': 0.7,
-    'RELATIVE': 0.75
+    'WORKPLACE': 0.8,
+    'RELATIVE': 0.5
 }
 
 ENTITY_TYPES = {
@@ -48,6 +48,19 @@ RELATION_TYPES = {
     'RELATIVE': 9      
 
 }
+
+VALID_COMB = {
+                'WORKS_AS': [('PERSON', 'PROFESSION')],
+                'MEMBER_OF': [('PERSON', 'ORGANIZATION')],
+                'FOUNDED_BY': [('ORGANIZATION', 'PERSON')],
+                'SPOUSE': [('PERSON', 'PERSON')],
+                'PARENT_OF': [('PERSON', 'PERSON'), ('PERSON', 'FAMILY'), ('FAMILY', 'FAMILY')],
+                'SIBLING': [('PERSON', 'PERSON')],
+                'PART_OF': [('ORGANIZATION', 'ORGANIZATION'), ('LOCATION', 'LOCATION')],
+                'WORKPLACE': [('PERSON', 'ORGANIZATION'), ('PERSON', 'LOCATION')],
+                'RELATIVE': [('PERSON', 'PERSON'), ('PERSON',  'FAMILY'), ('FAMILY', 'FAMILY')]
+}
+            
 
 RELATION_TYPES_INV = {v: k for k, v in RELATION_TYPES.items()}
 
@@ -185,13 +198,30 @@ class NERRelationModel(nn.Module):
                     entity_embeddings.append(entity_embed)
                     entity_types.append(e['type'])
 
-                # Build complete graph
-                edge_index = torch.tensor([
-                    [i, j] for i in range(len(valid_entities)) 
-                    for j in range(len(valid_entities)) if i != j
-                ], dtype=torch.long).t().contiguous().to(device)
-
                 x = torch.stack(entity_embeddings).to(device)
+
+                valid_pairs = []
+                for i, e1 in enumerate(valid_entities):
+                    for j, e2 in enumerate(valid_entities):
+                        if i == j:
+                            continue
+
+                        if abs(e1['start'] - e2['start']) > 80:
+                            continue 
+
+
+                        for rel_type, pairs in VALID_COMB.items():
+                            if (e1['type'], e2['type'] in pairs):
+                                valid_pairs.append((i, j, rel_type))
+                                break
+
+                if not valid_pairs:
+                    continue
+
+                # Build graph
+                edge_index = torch.tensor([
+                    [i, j] for i, j, _ in valid_pairs
+                ], dtype=torch.long).t().contiguous().to(device)
 
                 # Apply improved GAT with normalization
                 x = self.gat1(x, edge_index)
@@ -223,32 +253,44 @@ class NERRelationModel(nn.Module):
                                 if rel_type == 'FOUNDED_BY':
                                     i, j = j, i
 
-                                pair_features = torch.cat([x[i], x[j]])
-                                rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
-                                rel_targets[rel_type].append(1.0)
-                                pos_count += 1
+                                if (i, j, rel_type) in valid_pairs:
+                                    pair_features = torch.cat([x[i], x[j]])
+                                    rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
+                                    rel_targets[rel_type].append(1.0)
+                                    pos_count += 1
 
                     print(f"Тип отношения {rel_type}: найдено {pos_count} положительных примеров")
 
-                    # Generate negative examples for this relation type
-                    neg_pairs = self._generate_negative_examples(
-                        entity_embeddings=x, 
-                        entity_types=entity_types, 
-                        rel_type=rel_type,
-                        pos_indices={(i,j) for (i,j), label in zip(sample['pairs'], sample['labels']) 
-                                    if label == RELATION_TYPES[rel_type]},
-                        ratio=0.5
-                    )
+                    # Generate negative examples for this relation type (только из валидных пар)
+                    rel_valid_pairs = [(i,j) for i,j,t in valid_pairs if t == rel_type]
+                    pos_indices = {(i,j) for (i,j), label in zip(sample['pairs'], sample['labels']) 
+                                if label == RELATION_TYPES[rel_type]}
+                    
+                    # Для FOUNDED_BY нужно учитывать обратное направление
+                    if rel_type == 'FOUNDED_BY':
+                        pos_indices = {(j,i) for (i,j) in pos_indices}
+                    
+                    neg_candidates = [p for p in rel_valid_pairs if p not in pos_indices]
+                    
+                    # Sample negatives (сохраняем соотношение 1:2)
+                    num_neg = min(2 * pos_count, len(neg_candidates))
+                    neg_pairs = random.sample(neg_candidates, num_neg) if neg_candidates else []
 
                     if neg_pairs:
-                        neg_features, neg_targets = neg_pairs
+                        neg_features = []
+                        neg_targets = []
+                        for i, j in neg_pairs:
+                            if rel_type == 'FOUNDED_BY':
+                                i, j = j, i  # Reverse direction for FOUNDED_BY
+                            pair_features = torch.cat([x[i], x[j]])
+                            neg_features.append(self.rel_classifiers[rel_type](pair_features))
+                            neg_targets.append(0.0)
+                        
                         rel_probs[rel_type].extend(neg_features)
                         rel_targets[rel_type].extend(neg_targets)
                         print(f"Добавлено {len(neg_targets)} отрицательных примеров для {rel_type}")
-
                     else:
                         print(f"Не удалось сгенерировать отрицательные примеры для {rel_type}")
-
 
                     # Calculate loss for this relation type
                     if rel_probs[rel_type]:
