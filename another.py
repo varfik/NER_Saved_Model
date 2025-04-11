@@ -273,7 +273,7 @@ class NERRelationModel(nn.Module):
 
                         # Adjust pos_weight based on class imbalance
                         pos_weight = torch.tensor([
-                            max(1.0, len(targets_tensor) / (sum(targets_tensor) + 1e-6)) * 5.0  # Увеличенный коэффициент
+                            max(1.0, len(targets_tensor) / (sum(targets_tensor) + 1e-6)) * 3.0  # Уменьшите коэффициент
                         ], device=device)
 
                         rel_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(
@@ -875,6 +875,9 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
             for i, e1 in enumerate(entities):
                 for j, e2 in enumerate(entities):
                     if i != j:
+                        if rel_type not in ['SPOUSE', 'SIBLING', 'RELATIVE']:
+                            if (e1['type'], e2['type']) not in VALID_COMB.get(rel_type, []):
+                                continue
                         # For FOUNDED_BY we need to reverse the direction
                         if rel_type == 'FOUNDED_BY':
                             src, tgt = j, i
