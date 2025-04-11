@@ -18,14 +18,14 @@ import numpy as np
 
 
 RELATION_THRESHOLDS = {
-    'WORKS_AS': 0.8,
-    'MEMBER_OF': 0.8,
-    'FOUNDED_BY': 0.8,
+    'WORKS_AS': 0.7,
+    'MEMBER_OF': 0.7,
+    'FOUNDED_BY': 0.7,
     'SPOUSE': 0.7,
     'PARENT_OF': 0.7,
     'SIBLING': 0.7,
-    'PART_OF': 0.8,
-    'WORKPLACE': 0.8,
+    'PART_OF': 0.7,
+    'WORKPLACE': 0.7,
     'RELATIVE': 0.7
 }
 
@@ -653,7 +653,7 @@ def train_model():
     # Training loop
     best_ner_f1 = 0
     # Цикл обучения
-    for epoch in range(3):
+    for epoch in range(20):
         model.train()
         epoch_loss = 0
         ner_correct = ner_total = 0
