@@ -1,5 +1,5 @@
-from another import NERRelationModel
-from another import predict
+from NEREL import NERRelationModel
+from NREEL import predict
 from transformers import AutoTokenizer
 
 if __name__ == "__main__":
