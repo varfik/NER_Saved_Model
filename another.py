@@ -17,15 +17,15 @@ from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
 RELATION_THRESHOLDS = {
-    'WORKS_AS': 0.85,
+    'WORKS_AS': 0.8,
     'MEMBER_OF': 0.8,
     'FOUNDED_BY': 0.8,
     'SPOUSE': 0.9,
-    'PARENT_OF': 0.85,
+    'PARENT_OF': 0.9,
     'SIBLING': 0.9,
     'PART_OF': 0.7,
     'WORKPLACE': 0.7,
-    'RELATIVE': 0.75
+    'RELATIVE': 0.9
 }
 
 ENTITY_TYPES = {
@@ -53,11 +53,11 @@ VALID_COMB = {
     'MEMBER_OF': [('PERSON', 'ORGANIZATION')],
     'FOUNDED_BY': [('ORGANIZATION', 'PERSON')],
     'SPOUSE': [('PERSON', 'PERSON')],
-    'PARENT_OF': [('PERSON', 'PERSON'), ('PERSON', 'FAMILY'), ('FAMILY', 'FAMILY')],
-    'SIBLING': [('PERSON', 'PERSON')],
+    'PARENT_OF': [('PERSON', 'FAMILY'), ('FAMILY', 'FAMILY')],
+    'SIBLING': [('PERSON', 'FAMILY')],
     'PART_OF': [('ORGANIZATION', 'ORGANIZATION'), ('LOCATION', 'LOCATION')],
     'WORKPLACE': [('PERSON', 'ORGANIZATION'), ('PERSON', 'LOCATION')],
-    'RELATIVE': [('PERSON', 'PERSON'), ('PERSON',  'FAMILY'), ('FAMILY', 'FAMILY')]
+    'RELATIVE': [('PERSON',  'FAMILY'), ('FAMILY', 'FAMILY')]
 }
 
 RELATION_TYPES_INV = {v: k for k, v in RELATION_TYPES.items()}
@@ -886,7 +886,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
                         logit = model.rel_classifiers[rel_type](pair_features)
                         prob = torch.sigmoid(logit).item()
                         
-                        if prob > relation_threshold:
+                        if prob > relation_threshold[rel_type]:
                             relations.append({
                                 'type': rel_type,
                                 'arg1_id': entities[src]['id'],
@@ -919,7 +919,10 @@ if __name__ == "__main__":
         "Айрат Мурзагалиев, заместитель начальника управления президента РФ, встретился с главой администрации Уфы.",
         "Иван Петров работает программистом в компании Яндекс.",
         "Доктор Сидоров принял пациентку Ковалеву в городской больнице.",
-        "Директор сводного экономического департамента Банка России Надежда Иванова назначена также на должность заместителя председателя ЦБ, сообщил в четверг регулятор."
+        "Директор сводного экономического департамента Банка России Надежда Иванова назначена также на должность заместителя председателя ЦБ, сообщил в четверг регулятор.",
+        "Дмитрий работает в организации 'ЭкоФарм'",
+        "Компания 'Технологии будущего' является частью крупной корпорации, расположенной в Санкт-Петербурге",
+        "Анна занимает должность главного врача в больнице 'Здоровье'."
     ]
     
     for text in test_texts:
