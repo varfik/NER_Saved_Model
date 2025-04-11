@@ -21,12 +21,12 @@ RELATION_THRESHOLDS = {
     'WORKS_AS': 0.8,
     'MEMBER_OF': 0.8,
     'FOUNDED_BY': 0.8,
-    'SPOUSE': 0.9,
-    'PARENT_OF': 0.9,
-    'SIBLING': 0.9,
-    'PART_OF': 0.7,
-    'WORKPLACE': 0.7,
-    'RELATIVE': 0.9
+    'SPOUSE': 0.7,
+    'PARENT_OF': 0.7,
+    'SIBLING': 0.7,
+    'PART_OF': 0.8,
+    'WORKPLACE': 0.8,
+    'RELATIVE': 0.7
 }
 
 ENTITY_TYPES = {
@@ -54,11 +54,11 @@ VALID_COMB = {
     'MEMBER_OF': [('PERSON', 'ORGANIZATION')],
     'FOUNDED_BY': [('ORGANIZATION', 'PERSON')],
     'SPOUSE': [('PERSON', 'PERSON')],
-    'PARENT_OF': [('PERSON', 'FAMILY'), ('FAMILY', 'FAMILY')],
-    'SIBLING': [('PERSON', 'FAMILY')],
+    'PARENT_OF': [('PERSON', 'PERSON'), ('PERSON', 'FAMILY'), ('FAMILY', 'FAMILY')],
+    'SIBLING': [('PERSON', 'PERSON'), ('PERSON', 'FAMILY')],
     'PART_OF': [('ORGANIZATION', 'ORGANIZATION'), ('LOCATION', 'LOCATION')],
     'WORKPLACE': [('PERSON', 'ORGANIZATION'), ('PERSON', 'LOCATION')],
-    'RELATIVE': [('PERSON',  'FAMILY'), ('FAMILY', 'FAMILY')]
+    'RELATIVE': [('PERSON', 'PERSON'), ('PERSON', 'FAMILY'), ('FAMILY', 'FAMILY')]
 }
 
 RELATION_TYPES_INV = {v: k for k, v in RELATION_TYPES.items()}
@@ -123,9 +123,7 @@ class NERRelationModel(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.4),
-            nn.Linear(hidden_dim, hidden_dim//2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim//2, 1)
+            nn.Linear(hidden_dim, 1)
         )
 
     def _build_symmetric_classifier(self, input_dim, hidden_dim):
