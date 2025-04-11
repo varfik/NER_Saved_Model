@@ -164,9 +164,10 @@ class NERRelationModel(nn.Module):
             total_rel_loss = 0
             rel_correct = 0
             rel_total = 0
+            rel_targets = defaultdict(list)
 
             for batch_idx, sample in enumerate(rel_data):
-                if not sample['pairs']:
+                if sample['pairs'].numel() == 0:
                     print(f"Пропуск примера {batch_idx}: нет пар отношений")
                     continue
         
@@ -177,7 +178,7 @@ class NERRelationModel(nn.Module):
                 ]
                 
                 if len(valid_entities) < 2:
-                    rint(f"Пропуск примера {batch_idx}: недостаточно сущностей ({len(valid_entities)})")
+                    print(f"Пропуск примера {batch_idx}: недостаточно сущностей ({len(valid_entities)})")
                     continue
 
                 print(f"\nОбработка примера {batch_idx}:")
