@@ -16,6 +16,7 @@ from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
+
 RELATION_THRESHOLDS = {
     'WORKS_AS': 0.8,
     'MEMBER_OF': 0.8,
