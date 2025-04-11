@@ -877,7 +877,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
                         logit = model.rel_classifiers[rel_type](pair_features)
                         prob = torch.sigmoid(logit).item()
 
-                        if prob > relation_threshold:
+                        if prob > relation_threshold['type']:
                             relations.append({
                                 'type': rel_type,
                                 'arg1_id': entities[src]['id'],
