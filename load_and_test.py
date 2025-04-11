@@ -1,5 +1,5 @@
-from NEREL import NERRelationModel
-from NEREL import predict
+from another import NERRelationModel
+from another import predict
 from transformers import AutoTokenizer
 
 if __name__ == "__main__":
@@ -8,7 +8,7 @@ if __name__ == "__main__":
     loaded_tokenizer = AutoTokenizer.from_pretrained("saved_model")
     
     # Текст для анализа
-    text = "Дмитрий работает в организации 'ЭкоФарм'. Елена является матерью Алексея. Компания 'Технологии будущего' является частью крупной корпорации, расположенной в Санкт-Петербурге. Сергей и Ольга - брат и сестра. Виктор является членом команды, расположенной в Москве. Михаил является супругом Ирины. Анна работает врачом в больнице 'Здоровье'."    
+    text = """"""    
     # Использование модели
     result = predict(text, loaded_model, loaded_tokenizer)
     
