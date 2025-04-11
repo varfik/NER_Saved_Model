@@ -738,7 +738,7 @@ def train_model():
 
 def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
     # Tokenize input with offset mapping
-    relation_threshold = {**RELATION_THRESHOLDS, **(relation_thresholds or {})}
+    relation_threshold = {**RELATION_THRESHOLDS, **(relation_threshold or {})}
     encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, max_length=512,
         truncation=True)
 
