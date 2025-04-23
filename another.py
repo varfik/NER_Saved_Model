@@ -915,11 +915,11 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
         'relations': sorted_relations
     }
 
-def print_family_relations_samples(dataset):
-    """Выводит предложения с семейными отношениями и сущностями FAMILY"""
-    print("Поиск предложений с семейными отношениями...")
+def find_family_relations_samples(dataset):
+    """Функция для поиска предложений с семейными отношениями и сущностями FAMILY"""
+    family_samples = []
     
-    for i, sample in enumerate(dataset.samples):
+    for sample in dataset.samples:
         # Проверяем наличие сущностей типа FAMILY
         has_family_entity = any(e['type'] == 'FAMILY' for e in sample['entities'])
         
@@ -928,36 +928,39 @@ def print_family_relations_samples(dataset):
         has_target_relation = any(r['type'] in target_relations for r in sample['relations'])
         
         if has_family_entity or has_target_relation:
-            print(f"\nПример {i+1}:")
-            print(f"Текст: {sample['text']}")
+            # Собираем информацию о сущностях и отношениях
+            entities_info = [
+                f"{e['type']}: {e['text']} (id: {e['id']})" 
+                for e in sample['entities']
+            ]
             
-            if has_family_entity:
-                print("Сущности FAMILY:")
-                for e in sample['entities']:
-                    if e['type'] == 'FAMILY':
-                        print(f" - {e['text']} (id: {e['id']})")
+            relations_info = [
+                f"{r['type']}: {r['arg1']} -> {r['arg2']}"
+                for r in sample['relations']
+            ]
             
-            if has_target_relation:
-                print("Семейные отношения:")
-                for r in sample['relations']:
-                    if r['type'] in target_relations:
-                        arg1 = next(e['text'] for e in sample['entities'] if e['id'] == r['arg1'])
-                        arg2 = next(e['text'] for e in sample['entities'] if e['id'] == r['arg2'])
-                        print(f" - {r['type']}: {arg1} -> {arg2}")
+            family_samples.append({
+                'text': sample['text'],
+                'entities': entities_info,
+                'relations': relations_info
+            })
+    
+    return family_samples
 
 if __name__ == "__main__":
+    # model, tokenizer = train_model()
     tokenizer = AutoTokenizer.from_pretrained("DeepPavlov/rubert-base-cased")
     train_dataset = NERELDataset("NEREL/NEREL-v1.1/train", tokenizer)
-    print_family_relations_samples(train_dataset)
-    # model, tokenizer = train_model()
-     # Находим все примеры с семейными отношениями
+    
+    # Находим все примеры с семейными отношениями
     family_samples = find_family_relations_samples(train_dataset)
     
     # Сохраняем результаты в файл
     with open("family_relations_samples.json", "w", encoding="utf-8") as f:
         json.dump(family_samples, f, indent=2, ensure_ascii=False)
-
-    print(f"Найдено {len(family_samles)} примеров с семейными отношениями:")
+    
+    # Выводим первые 5 примеров
+    print(f"Найдено {len(family_samples)} примеров с семейными отношениями:")
     for i, sample in enumerate(family_samples[:5]):
         print(f"\nПример {i+1}:")
         print(f"Текст: {sample['text']}")
@@ -967,6 +970,7 @@ if __name__ == "__main__":
         print("Отношения:")
         for r in sample['relations']:
             print(f" - {r}")
+    
     # test_texts = [
     #     "Айрат Мурзагалиев, заместитель начальника управления президента РФ, встретился с главой администрации Уфы.",
     #     "Иван Петров работает программистом в компании Яндекс.",
