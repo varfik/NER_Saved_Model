@@ -946,61 +946,40 @@ def find_family_relations_samples(dataset):
     return family_samples
 
 if __name__ == "__main__":
-    # model, tokenizer = train_model()
-    tokenizer = AutoTokenizer.from_pretrained("DeepPavlov/rubert-base-cased")
-    train_dataset = NERELDataset("NEREL/NEREL-v1.1/train", tokenizer)
-    
-    # Находим все примеры с семейными отношениями
-    family_samples = find_family_relations_samples(train_dataset)
-    
-    # Сохраняем результаты в файл
-    with open("family_relations_samples.json", "w", encoding="utf-8") as f:
-        json.dump(family_samples, f, indent=2, ensure_ascii=False)
-    
-    # Выводим первые 5 примеров
-    print(f"Найдено {len(family_samples)} примеров с семейными отношениями:")
-    for i, sample in enumerate(family_samples[:5]):
-        print(f"\nПример {i+1}:")
-        print(f"Текст: {sample['text']}")
-        print("Сущности:")
-        for e in sample['entities']:
-            print(f" - {e}")
-        print("Отношения:")
-        for r in sample['relations']:
-            print(f" - {r}")
-    
-    # test_texts = [
-    #     "Айрат Мурзагалиев, заместитель начальника управления президента РФ, встретился с главой администрации Уфы.",
-    #     "Иван Петров работает программистом в компании Яндекс.",
-    #     "Доктор Сидоров принял пациентку Ковалеву в городской больнице.",
-    #     "Директор сводного экономического департамента Банка России Надежда Иванова назначена также на должность заместителя председателя ЦБ, сообщил в четверг регулятор.",
-    #     "Дмитрий работает в организации 'ЭкоФарм'",
-    #     "Компания 'Технологии будущего' является частью крупной корпорации, расположенной в Санкт-Петербурге",
-    #     "Анна занимает должность главного врача в больнице 'Здоровье'."
-    # ]
-    
-    # for text in test_texts:
-    #     print("\n" + "="*80)
-    #     print(f"Processing text: '{text}'")
-    #     result = predict(text, model, tokenizer)
-    #     print("\nEntities:")
-    #     for e in result['entities']:
-    #         print(f"{e['type']}: {e['text']}")
-    #     print("\nRelations:")
-    #     for r in result['relations']:
-    #         print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (conf: {r['confidence']:.2f})")
+    model, tokenizer = train_model()
 
-    # # Для загрузки модели
-    # loaded_model = NERRelationModel.from_pretrained("saved_model")
-    # loaded_tokenizer = AutoTokenizer.from_pretrained("saved_model")
+    test_texts = [
+        "Айрат Мурзагалиев, заместитель начальника управления президента РФ, встретился с главой администрации Уфы.",
+        "Иван Петров работает программистом в компании Яндекс.",
+        "Доктор Сидоров принял пациентку Ковалеву в городской больнице.",
+        "Директор сводного экономического департамента Банка России Надежда Иванова назначена также на должность заместителя председателя ЦБ, сообщил в четверг регулятор.",
+        "Дмитрий работает в организации 'ЭкоФарм'",
+        "Компания 'Технологии будущего' является частью крупной корпорации, расположенной в Санкт-Петербурге",
+        "Анна занимает должность главного врача в больнице 'Здоровье'."
+    ]
     
-    # # Использование модели
-    # result = predict("По улице шел красивый человек, его имя было Мефодий. И был он счастлив. Работал этот чувак в яндексе, разработчиком. Или директором. Он пока не определился!", loaded_model, loaded_tokenizer)
-    # print("Сущности:")
-    # for e in result['entities']:
-    #     print(f"{e['type']}: {e['text']} (позиция: {e['start_char']}-{e['end_char']})")
+    for text in test_texts:
+        print("\n" + "="*80)
+        print(f"Processing text: '{text}'")
+        result = predict(text, model, tokenizer)
+        print("\nEntities:")
+        for e in result['entities']:
+            print(f"{e['type']}: {e['text']}")
+        print("\nRelations:")
+        for r in result['relations']:
+            print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (conf: {r['confidence']:.2f})")
 
-    # print("\nОтношения:")
-    # for r in result['relations']:
-    #     print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (confidence: {r['confidence']:.2f})")
+    # Для загрузки модели
+    loaded_model = NERRelationModel.from_pretrained("saved_model")
+    loaded_tokenizer = AutoTokenizer.from_pretrained("saved_model")
+    
+    # Использование модели
+    result = predict("По улице шел красивый человек, его имя было Мефодий. И был он счастлив. Работал этот чувак в яндексе, разработчиком. Или директором. Он пока не определился!", loaded_model, loaded_tokenizer)
+    print("Сущности:")
+    for e in result['entities']:
+        print(f"{e['type']}: {e['text']} (позиция: {e['start_char']}-{e['end_char']})")
+
+    print("\nОтношения:")
+    for r in result['relations']:
+        print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (confidence: {r['confidence']:.2f})")
 
