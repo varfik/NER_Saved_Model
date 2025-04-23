@@ -915,11 +915,11 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
         'relations': sorted_relations
     }
 
-def find_family_relations_samples(dataset):
-    """Функция для поиска предложений с семейными отношениями и сущностями FAMILY"""
-    family_samples = []
+def print_family_relations_samples(dataset):
+    """Выводит предложения с семейными отношениями и сущностями FAMILY"""
+    print("Поиск предложений с семейными отношениями...")
     
-    for sample in dataset.samples:
+    for i, sample in enumerate(dataset.samples):
         # Проверяем наличие сущностей типа FAMILY
         has_family_entity = any(e['type'] == 'FAMILY' for e in sample['entities'])
         
@@ -928,24 +928,22 @@ def find_family_relations_samples(dataset):
         has_target_relation = any(r['type'] in target_relations for r in sample['relations'])
         
         if has_family_entity or has_target_relation:
-            # Собираем информацию о сущностях и отношениях
-            entities_info = [
-                f"{e['type']}: {e['text']} (id: {e['id']})" 
-                for e in sample['entities']
-            ]
+            print(f"\nПример {i+1}:")
+            print(f"Текст: {sample['text']}")
             
-            relations_info = [
-                f"{r['type']}: {r['arg1']} -> {r['arg2']}"
-                for r in sample['relations']
-            ]
+            if has_family_entity:
+                print("Сущности FAMILY:")
+                for e in sample['entities']:
+                    if e['type'] == 'FAMILY':
+                        print(f" - {e['text']} (id: {e['id']})")
             
-            family_samples.append({
-                'text': sample['text'],
-                'entities': entities_info,
-                'relations': relations_info
-            })
-    
-    return family_samples
+            if has_target_relation:
+                print("Семейные отношения:")
+                for r in sample['relations']:
+                    if r['type'] in target_relations:
+                        arg1 = next(e['text'] for e in sample['entities'] if e['id'] == r['arg1'])
+                        arg2 = next(e['text'] for e in sample['entities'] if e['id'] == r['arg2'])
+                        print(f" - {r['type']}: {arg1} -> {arg2}")
 
 if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained("DeepPavlov/rubert-base-cased")
