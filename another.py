@@ -275,7 +275,8 @@ class NERRelationModel(nn.Module):
                             pos_weight = torch.tensor([5.0], device=device)  # Увеличиваем вес
                         else:
                             pos_weight = torch.tensor([1.0], device=device)
-                        rel_loss = BCEWithLogitsLoss(pos_weight=pos_weight)
+                        rel_loss =nn.BCEWithLogitsLoss(pos_weight=pos_weight)(
+                             probs_tensor, targets_tensor)
                         total_loss += loss
 
                         # Отладочная информация
