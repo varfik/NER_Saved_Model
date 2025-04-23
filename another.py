@@ -21,12 +21,12 @@ RELATION_THRESHOLDS = {
     'WORKS_AS': 0.7,
     'MEMBER_OF': 0.7,
     'FOUNDED_BY': 0.7,
-    'SPOUSE': 0.7,
-    'PARENT_OF': 0.7,
-    'SIBLING': 0.7,
+    'SPOUSE': 0.5,
+    'PARENT_OF': 0.5,
+    'SIBLING': 0.5,
     'PART_OF': 0.7,
     'WORKPLACE': 0.7,
-    'RELATIVE': 0.7
+    'RELATIVE': 0.5
 }
 
 ENTITY_TYPES = {
@@ -271,14 +271,12 @@ class NERRelationModel(nn.Module):
                         probs_tensor = torch.cat(rel_probs[rel_type][:min_len]).view(-1)
                         targets_tensor = torch.tensor(rel_targets[rel_type][:min_len], dtype=torch.float, device=device)
 
-                        # Adjust pos_weight based on class imbalance
-                        pos_weight = torch.tensor([
-                            max(1.0, len(targets_tensor) / (sum(targets_tensor) + 1e-6)) * 3.0  # Уменьшите коэффициент
-                        ], device=device)
-
-                        rel_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(
-                            probs_tensor, targets_tensor)
-                        total_loss += rel_loss * 1.0  # Weight relation loss
+                        if rel_type in ['SPOUSE', 'SIBLING', 'RELATIVE']:
+                            pos_weight = torch.tensor([5.0], device=device)  # Увеличиваем вес
+                        else:
+                            pos_weight = torch.tensor([1.0], device=device)
+                        rel_loss = BCEWithLogitsLoss(pos_weight=pos_weight)
+                        total_loss += loss
 
                         # Отладочная информация
                         preds = (torch.sigmoid(probs_tensor) > 0.5).long()
