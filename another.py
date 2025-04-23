@@ -277,7 +277,7 @@ class NERRelationModel(nn.Module):
                             pos_weight = torch.tensor([1.0], device=device)
                         rel_loss =nn.BCEWithLogitsLoss(pos_weight=pos_weight)(
                              probs_tensor, targets_tensor)
-                        total_loss += loss
+                        total_loss += rel_loss
 
                         # Отладочная информация
                         preds = (torch.sigmoid(probs_tensor) > 0.5).long()
