@@ -285,8 +285,6 @@ class NERRelationModel(nn.Module):
                         correct = (preds == targets_tensor.long()).sum().item()
                         accuracy = correct / len(targets_tensor)
 
-
-                        print(f"Relation {rel_type}: Generated {len(sampled_pairs)} negatives (requested {num_neg}) from {len(valid_pairs)} possible, had {num_pos} positives")
                         print(f"Отношение {rel_type}: loss={rel_loss.item():.4f}, accuracy={accuracy:.2%}, "
                             f"pos/neg={sum(targets_tensor)}/{len(targets_tensor)-sum(targets_tensor)}")
 
