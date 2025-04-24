@@ -253,7 +253,7 @@ class NERRelationModel(nn.Module):
                         rel_type=rel_type,
                         pos_indices={(i,j) for (i,j), label in zip(sample['pairs'], sample['labels']) 
                                     if label == RELATION_TYPES[rel_type]},
-                        ratio=0.5
+                        ratio=5
                     )
 
                     if neg_pairs:
@@ -285,6 +285,8 @@ class NERRelationModel(nn.Module):
                         correct = (preds == targets_tensor.long()).sum().item()
                         accuracy = correct / len(targets_tensor)
 
+
+                        print(f"Relation {rel_type}: Generated {len(sampled_pairs)} negatives (requested {num_neg}) from {len(valid_pairs)} possible, had {num_pos} positives")
                         print(f"Отношение {rel_type}: loss={rel_loss.item():.4f}, accuracy={accuracy:.2%}, "
                             f"pos/neg={sum(targets_tensor)}/{len(targets_tensor)-sum(targets_tensor)}")
 
@@ -309,17 +311,18 @@ class NERRelationModel(nn.Module):
         for i, e1 in enumerate(entity_types):
             for j, e2 in enumerate(entity_types):
                 if i != j and (e1, e2) in VALID_COMB.get(rel_type, []):
-                    valid_pairs.append((i, j))
-        
-        # For symmetric relations, consider only unique pairs
-        if rel_type in ['SPOUSE', 'SIBLING']:
-            valid_pairs = list({(min(i,j), max(i,j)) for i,j in valid_pairs})
+                     # For symmetric relations, consider only unique pairs
+                    if rel_type in ['SPOUSE', 'SIBLING', 'RELATIVE']:
+                        if (min(i,j), max(i,j)) not in valid_pairs:
+                            valid_pairs.append((min(i,j), max(i,j)))
+                    else:
+                        valid_pairs.append((i, j))
         
         # Exclude positive examples
         valid_pairs = [p for p in valid_pairs if p not in pos_indices]
         
         # Sample negative examples
-        num_samples = min(len(valid_pairs), max(10 * len(pos_indices), 20))
+        num_samples = min(len(valid_pairs), max(5 * len(pos_indices), 5))
         sampled_pairs = random.sample(valid_pairs, num_samples) if valid_pairs else []
         
         for i, j in sampled_pairs:
