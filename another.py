@@ -87,7 +87,7 @@ class NERRelationModel(nn.Module):
         self.gat1 = GATConv(
             self.bert.config.hidden_size, 
             128, 
-            heads=4, 
+            heads=2, 
             dropout=0.3,
             concat=True
         )
@@ -122,7 +122,7 @@ class NERRelationModel(nn.Module):
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.4),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, 1)
         )
 
@@ -132,7 +132,7 @@ class NERRelationModel(nn.Module):
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.4),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, 1)
         )
 
@@ -272,7 +272,7 @@ class NERRelationModel(nn.Module):
                         targets_tensor = torch.tensor(rel_targets[rel_type][:min_len], dtype=torch.float, device=device)
 
                         if rel_type in ['SPOUSE', 'SIBLING', 'RELATIVE']:
-                            pos_weight = torch.tensor([5.0], device=device)  # Увеличиваем вес
+                            pos_weight = torch.tensor([3.0], device=device)  # Увеличиваем вес
                         else:
                             pos_weight = torch.tensor([1.0], device=device)
                         rel_loss =nn.BCEWithLogitsLoss(pos_weight=pos_weight)(
