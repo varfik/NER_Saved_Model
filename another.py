@@ -54,11 +54,11 @@ VALID_COMB = {
     'MEMBER_OF': [('PERSON', 'ORGANIZATION')],
     'FOUNDED_BY': [('ORGANIZATION', 'PERSON')],
     'SPOUSE': [('PERSON', 'PERSON')],
-    'PARENT_OF': [('PERSON', 'PERSON'), ('PERSON', 'FAMILY'), ('FAMILY', 'FAMILY')],
-    'SIBLING': [('PERSON', 'PERSON'), ('PERSON', 'FAMILY')],
+    'PARENT_OF': [('PERSON', 'PERSON')],
+    'SIBLING': [('PERSON', 'PERSON')],
     'PART_OF': [('ORGANIZATION', 'ORGANIZATION'), ('LOCATION', 'LOCATION')],
     'WORKPLACE': [('PERSON', 'ORGANIZATION'), ('PERSON', 'LOCATION')],
-    'RELATIVE': [('PERSON', 'PERSON'), ('PERSON', 'FAMILY'), ('FAMILY', 'FAMILY')]
+    'RELATIVE': [('PERSON', 'PERSON')]
 }
 
 RELATION_TYPES_INV = {v: k for k, v in RELATION_TYPES.items()}
@@ -91,9 +91,9 @@ class NERRelationModel(nn.Module):
             dropout=0.3,
             concat=True
         )
-        self.norm1 = nn.LayerNorm(128 * 4)
+        self.norm1 = nn.LayerNorm(128 * 2)
         self.gat2 = GATConv(
-            128 * 4, 
+            128 * 2, 
             64, 
             heads=1, 
             dropout=0.3,
