@@ -52,7 +52,7 @@ RELATION_TYPES = {
 VALID_COMB = {
     'WORKS_AS': [('PERSON', 'PROFESSION')],
     'MEMBER_OF': [('PERSON', 'ORGANIZATION')],
-    'FOUNDED_BY': [('ORGANIZATION', 'PERSON')],
+    'FOUNDED_BY': [('ORGANIZATION', 'PERSON'), ('LOCATION', 'PERSON')],
     'SPOUSE': [('PERSON', 'PERSON')],
     'PARENT_OF': [('PERSON', 'PERSON')],
     'SIBLING': [('PERSON', 'PERSON')],
@@ -182,10 +182,10 @@ class NERRelationModel(nn.Module):
                     print(f"Пропуск примера {batch_idx}: недостаточно сущностей ({len(valid_entities)})")
                     continue
 
-                print(f"\nОбработка примера {batch_idx}:")
-                print(f"Сущности: {[(e['type'], e['id']) for e in valid_entities]}")
-                print(f"Пары отношений: {sample['pairs']}")
-                print(f"Метки отношений: {sample['labels']}") 
+                # print(f"\nОбработка примера {batch_idx}:")
+                # print(f"Сущности: {[(e['type'], e['id']) for e in valid_entities]}")
+                # print(f"Пары отношений: {sample['pairs']}")
+                # print(f"Метки отношений: {sample['labels']}") 
 
                 # Create entity embeddings
                 entity_embeddings = []
@@ -243,6 +243,7 @@ class NERRelationModel(nn.Module):
                                 rel_targets[rel_type].append(1.0)
                                 pos_count += 1
 
+                    print(f"\nОбработка примера {batch_idx}:")
                     print(f"Тип отношения {rel_type}: найдено {pos_count} положительных примеров")
 
                     # Generate negative examples for this relation type
@@ -272,7 +273,7 @@ class NERRelationModel(nn.Module):
                         targets_tensor = torch.tensor(rel_targets[rel_type][:min_len], dtype=torch.float, device=device)
 
                         if rel_type in ['SPOUSE', 'SIBLING', 'RELATIVE']:
-                            pos_weight = torch.tensor([3.0], device=device)  # Увеличиваем вес
+                            pos_weight = torch.tensor([3.0], device=device) 
                         else:
                             pos_weight = torch.tensor([1.0], device=device)
                         rel_loss =nn.BCEWithLogitsLoss(pos_weight=pos_weight)(
@@ -950,6 +951,7 @@ if __name__ == "__main__":
     model, tokenizer = train_model()
 
     test_texts = [
+        "Эмир Катара встретится с членами королевской семьи.Эмир Катара шейх Хамад бен Халиф Аль Тани встретится в понедельник с членами королевской семьи и высокопоставленными чиновниками страны на фоне слухов о том, что он намерен передать власть сыну — наследному принцу шейху Тамиму, передает агентство Рейтер со ссылкой на катарский телеканал 'Аль-Джазира'. 'Аль-Джазира', в свою очередь, ссылается на 'надежный источник в Катаре', но не приводит каких-либо деталей. Ранее в этом месяце в дипломатических кругах появились слухи, что эмир Катара, которому сейчас 61 год, рассматривает возможность передачи власти 33-летнему наследному принцу, отмечает агентство. При этом также предполагается, что в отставку подаст влиятельный премьер-министр и министр иностранных дел Катара шейх Хамад бен Джасем Аль Тани. По данным агентства, дипломаты западных и арабских стран оценивают такое решение как попытку осторожной передачи власти более молодому поколению правителей. Ранее новостной портал "Элаф" отмечал, что перемены во властных структурах Катара могут произойти уже в конце июня. Согласно информации агентства Франс Пресс, Тамим бен Хамад Аль Тани родился в 1980 году и является вторым сыном эмира и его второй жены Мозы бинт Нассер. Наследный принц занимает офицерский пост в катарской армии, а также является главой Олимпийского комитета страны.",
         "Айрат Мурзагалиев, заместитель начальника управления президента РФ, встретился с главой администрации Уфы.",
         "Иван Петров работает программистом в компании Яндекс.",
         "Доктор Сидоров принял пациентку Ковалеву в городской больнице.",
