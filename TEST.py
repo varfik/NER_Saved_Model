@@ -121,21 +121,24 @@ class NERRelationModel(nn.Module):
         self._init_weights()
 
     def _get_entity_embeddings(self, sequence_output, entities):
-        """Extract and normalize entity embeddings with type information"""
+        """Извлекает эмбеддинги сущностей по их границам (start, end) в токенах."""
         entity_embeddings = []
         entity_types = []
 
         for e in entities:
-            # Get token embeddings for the entity
-            token_embeddings = sequence_output[e['token_ids']]
-            # Average all token embeddings
+            # Получаем эмбеддинги токенов сущности
+            start = e['start']
+            end = e['end'] + 1  # end включительно
+            token_embeddings = sequence_output[start:end]  # [num_tokens, hidden_size]
+
+            # Усредняем эмбеддинги токенов
             entity_embed = token_embeddings.mean(dim=0)
 
-            # Get entity type embedding
-            type_idx = ENTITY_TYPES.get(e['type'], 0)  # 0 is unknown type
+            # Добавляем эмбеддинг типа сущности
+            type_idx = ENTITY_TYPES.get(e['type'], 0)
             type_embed = self.entity_type_emb(torch.tensor(type_idx, device=entity_embed.device))
 
-            # Combine and normalize
+            # Объединяем и нормализуем
             combined = torch.cat([entity_embed, type_embed])
             normalized = self.entity_norm(combined)
 
@@ -832,7 +835,6 @@ def extract_entities(tokens, ner_preds, offset_mapping, special_tokens_mask, tex
                 "end": i,
                 "start_char": token_start,
                 "end_char": token_end,
-                "token_ids": [i],
             }
             entity_id += 1
 
