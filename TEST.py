@@ -238,8 +238,8 @@ class NERRelationModel(nn.Module):
 
                 edge_index = torch.tensor(edge_pairs, dtype=torch.long).t().contiguous().to(device)
 
-                x = torch.stack(entity_embeddings).to(device)
 
+                x = entity_embeddings
                 # Apply improved GAT with normalization
                 x = self.gat1(x, edge_index)
                 x = self.norm1(x)
