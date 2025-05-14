@@ -496,7 +496,8 @@ class NERELDataset(Dataset):
             'attention_mask': encoding['attention_mask'].squeeze(0),
             'ner_labels': ner_labels,
             'rel_data': rel_data,
-            'text': text
+            'text': text,
+            'offset_mapping': encoding['offset_mapping'].squeeze(0)
         }
 
         if self.include_offsets:
