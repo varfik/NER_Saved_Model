@@ -115,7 +115,7 @@ class NERRelationModel(nn.Module):
         # Concatenate heads from first layer
 
         # Embeddings
-        self.entity_type_emb = nn.Embedding(len(entity_types), 32)
+        self.entity_type_emb = nn.Embedding(len(entity_types), 768)
         self.rel_type_emb = nn.Embedding(self.num_rel_labels, 32)
 
         self.rel_classifier = nn.Sequential(
