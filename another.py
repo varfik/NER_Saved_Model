@@ -16,6 +16,16 @@ from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
+from termcolor import colored
+
+ENTITY_COLORS = {
+    'PERSON': 'cyan',
+    'PROFESSION': 'green',
+    'ORGANIZATION': 'yellow',
+    'FAMILY': 'magenta',
+    'LOCATION': 'blue',
+}
+
 
 RELATION_THRESHOLDS = {
     'WORKS_AS': 0.7,
@@ -305,11 +315,14 @@ class NERRelationModel(nn.Module):
         except Exception as e:
             raise RuntimeError(f"Error loading model from {model_dir}: {str(e)}")
 
+
+SYMMETRIC_RELATIONS = {'SIBLING', 'SPOUSE', 'RELATIVE'}
 class NERELDataset(Dataset):
-    def __init__(self, data_dir, tokenizer, max_length=512):
+    def __init__(self, data_dir, tokenizer, max_length=512, include_offsets=False):
         self.data_dir = data_dir
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.include_offsets = include_offsets
         self.samples = self._load_samples()
         
     def _load_samples(self):
@@ -349,31 +362,31 @@ class NERELDataset(Dataset):
                     type_and_span = parts[1].split()
                     entity_type = type_and_span[0]
 
-                    # Поддерживаемые типы сущностей
-                    if entity_type in ENTITY_TYPES:
+                    if entity_type not in ENTITY_TYPES:
+                        print(f"Неизвестный тип сущности: {entity_typen}")
+                        continue
+                    try:
                         start = int(type_and_span[1])
                         end = int(type_and_span[-1])
-                        entity_text = parts[2]
-                        
-                        # Verify entity span matches text
-                        if text[start:end] != entity_text:
-                            # Try to find correct span
-                            found_pos = text.find(entity_text)
-                            if found_pos != -1:
-                                start = found_pos
-                                end = found_pos + len(entity_text)
-                            else:
-                                continue # Пропускать сущности, которые не найдены в тексте
-                    
-                        entity = {
-                            'id': entity_id,
-                            'type': entity_type,
-                            'start': start,
-                            'end': end,
-                            'text': entity_text
-                        }
-                        entities.append(entity)
-                        entity_map[entity_id] = entity
+                    except ValueError:
+                        continue
+                    entity_text = parts[2]
+                    if text[start:end] != entity_text:
+                        found_pos = text.find(entity_text)
+                        if found_pos != -1:
+                            start = found_pos
+                            end = found_pos + len(entity_text)
+                        else:
+                            continue
+                    entity = {
+                        'id': entity_id,
+                        'type': entity_type,
+                        'start': start,
+                        'end': end,
+                        'text': entity_text
+                    }
+                    entities.append(entity)
+                    entity_map[entity_id] = entity
                 
                 elif line.startswith('R'):
                     parts = line.split('\t')
@@ -387,17 +400,9 @@ class NERELDataset(Dataset):
                     rel_type = rel_info[0]
                     arg1 = rel_info[1].split(':')[1] if ':' in rel_info[1] else None
                     arg2 = rel_info[2].split(':')[1] if ':' in rel_info[2] else None
-                    
-                    if not arg1 or not arg2:
-                        continue
-                    
-                    # Проверяем существование сущностей
-                    if arg1 in entity_map and arg2 in entity_map:
-                        relations.append({
-                            'type': rel_type,
-                            'arg1': arg1,
-                            'arg2': arg2
-                        })
+
+                    if arg1 and arg2 and arg1 in entity_map and arg2 in entity_map:
+                        relations.append({'type': rel_type, 'arg1': arg1, 'arg2': arg2})
         return entities, relations
     
     def __len__(self):
@@ -419,46 +424,33 @@ class NERELDataset(Dataset):
         
         # Initialize NER labels (0=O, 1=B-PER, 2=I-PER, 3=B-PROF, 4=I-PROF, 5=B-ORGANIZATION, 6=I-ORGANIZATION, 7=B-FAMILY, 8=I-FAMILY)
         ner_labels = torch.zeros(self.max_length, dtype=torch.long)
+        offset_mapping = encoding['offset_mapping'][0]
         token_entities = []
 
         # Align entities with tokenization
         for entity in sample['entities']:
-             # Find token spans for entity
-            start_token = end_token = None
-            for i, (start, end) in enumerate(encoding['offset_mapping'][0]):
-                if start <= entity['start'] < end and start_token is None:
-                    start_token = i
-                if start < entity['end'] <= end and end_token is None:
-                    end_token = i
-                if start >= entity['end']:
-                    break
-            
-            if start_token is not None and end_token is not None:
-                # Set BIO labels
-                if entity['type'] == 'PERSON':
-                    ner_labels[start_token] = 1  # B-PER
-                    ner_labels[start_token+1:end_token+1] = 2  # I-PER
-                elif entity['type'] == 'PROFESSION':
-                    ner_labels[start_token] = 3  # B-PROF
-                    ner_labels[start_token+1:end_token+1] = 4  # I-PROF
-                elif entity['type'] == 'ORGANIZATION':
-                    ner_labels[start_token] = 5  # B-ORG
-                    ner_labels[start_token+1:end_token+1] = 6  # I-ORG
-                elif entity['type'] == 'FAMILY':
-                    ner_labels[start_token] = 7  # B-FAM
-                    ner_labels[start_token+1:end_token+1] = 8  # I-FAM
-                elif entity['type'] == 'LOCATION':
-                    ner_labels[start_token] = 9  # B-LOC
-                    ner_labels[start_token+1:end_token+1] = 10  # I-LOC
+            matched_tokens = []
+            for i, (start, end) in enumerate(offset_mapping):
+                if start == end:
+                    continue  # спецтокены
+                if not (end <= entity['start'] or start >= entity['end']):
+                    matched_tokens.append(i)
+            if not matched_tokens:
+                continue
 
-                token_entities.append({
-                    'start': start_token,
-                    'end': end_token,
-                    'type': entity['type'],
-                    'id': entity['id']
-                })
+            ent_type_id = ENTITY_TYPES[entity['type']]
+            b_label = ent_type_id * 2 - 1
+            i_label = ent_type_id * 2
+            ner_labels[matched_tokens[0]] = b_label
+            if len(matched_tokens) > 1:
+                ner_labels[matched_tokens[1:]] = i_label
+            token_entities.append({
+                'start': matched_tokens[0],
+                'end': matched_tokens[-1],
+                'type': entity['type'],
+                'id': entity['id']
+            })
 
-        # Prepare relation data
         rel_data = {
             'entities': token_entities,
             'pairs': [],
@@ -466,23 +458,50 @@ class NERELDataset(Dataset):
         }
         
         token_entity_id_to_idx = {e['id']: i for i, e in enumerate(token_entities)}
-        
+        used_pairs = set()
+
+        # Положительные примеры
         for relation in sample['relations']:
-            arg1_token_idx = token_entity_id_to_idx.get(relation['arg1'], -1)
-            arg2_token_idx = token_entity_id_to_idx.get(relation['arg2'], -1)
-            
-            if arg1_token_idx != -1 and arg2_token_idx != -1 and relation['type'] in RELATION_TYPES:
-                rel_data['pairs'].append((arg1_token_idx, arg2_token_idx))
+            if relation['type'] not in RELATION_TYPES:
+                continue
+            idx1 = token_entity_id_to_idx.get(relation['arg1'], -1)
+            idx2 = token_entity_id_to_idx.get(relation['arg2'], -1)
+            if idx1 == -1 or idx2 == -1:
+                continue
+            if relation['type'] in SYMMETRIC_RELATIONS:
+                idx1, idx2 = sorted([idx1, idx2])
+            pair = (idx1, idx2)
+            if pair not in used_pairs:
+                rel_data['pairs'].append(pair)
                 rel_data['labels'].append(RELATION_TYPES[relation['type']])
-                
-        return {
+                used_pairs.add(pair)
+
+        # Отрицательные примеры
+        num_entities = len(token_entities)
+        for i in range(num_entities):
+            for j in range(num_entities):
+                if i == j:
+                    continue
+                pair = (min(i, j), max(i, j)) if (token_entities[i]['type'],
+                                                  token_entities[j]['type']) in SYMMETRIC_RELATIONS else (i, j)
+                if pair in used_pairs:
+                    continue
+                rel_data['pairs'].append(pair)
+                rel_data['labels'].append(0)  # 0 — нет отношения
+                used_pairs.add(pair)
+
+        output = {
             'input_ids': encoding['input_ids'].squeeze(0),
             'attention_mask': encoding['attention_mask'].squeeze(0),
             'ner_labels': ner_labels,
             'rel_data': rel_data,
-            'text': text,
-            'offset_mapping': encoding['offset_mapping'].squeeze(0)
+            'text': text
         }
+
+        if self.include_offsets:
+            output['offset_mapping'] = offset_mapping
+
+        return output
 
 def collate_fn(batch):
     # All elements already padded to max_length
@@ -630,6 +649,38 @@ def train_model():
     print(f"Model saved to {save_dir}")
     
     return model, tokenizer
+
+def format_relation(arg1_text, arg2_text, rel_type, confidence):
+    conf_str = f"{confidence:.2f}"
+    return f"🔗 {colored(arg1_text, 'white', attrs=['bold'])} --{rel_type}({conf_str})--> {colored(arg2_text, 'white', attrs=['bold'])}"
+
+def visualize_prediction_colored(prediction):
+    text = prediction['text']
+    entities = sorted(prediction['entities'], key=lambda e: e['start_char'])
+    relations = prediction['relations']
+
+    result_text = ""
+    last_pos = 0
+
+    for ent in entities:
+        # Add raw text before this entity
+        result_text += text[last_pos:ent['start_char']]
+
+        # Color entity
+        color = ENTITY_COLORS.get(ent['type'], 'white')
+        entity_str = colored(ent['text'], color, attrs=["bold"])
+        result_text += f"[{entity_str}]({ent['type']})"
+
+        last_pos = ent['end_char']
+
+    result_text += text[last_pos:]
+
+    # Format relations
+    rel_lines = []
+    for rel in relations:
+        rel_lines.append(format_relation(rel['arg1']['text'], rel['arg2']['text'], rel['type'], rel['confidence']))
+
+    return "\n" + "\n".join(rel_lines) + "\n\n" + result_text
 
 def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
     # Tokenize input with offset mapping
@@ -809,38 +860,6 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
         'relations': sorted_relations
     }
 
-def find_family_relations_samples(dataset):
-    """Функция для поиска предложений с семейными отношениями и сущностями FAMILY"""
-    family_samples = []
-    
-    for sample in dataset.samples:
-        # Проверяем наличие сущностей типа FAMILY
-        has_family_entity = any(e['type'] == 'FAMILY' for e in sample['entities'])
-        
-        # Проверяем наличие нужных типов отношений
-        target_relations = {'SPOUSE', 'SIBLING', 'RELATIVE'}
-        has_target_relation = any(r['type'] in target_relations for r in sample['relations'])
-        
-        if has_family_entity or has_target_relation:
-            # Собираем информацию о сущностях и отношениях
-            entities_info = [
-                f"{e['type']}: {e['text']} (id: {e['id']})" 
-                for e in sample['entities']
-            ]
-            
-            relations_info = [
-                f"{r['type']}: {r['arg1']} -> {r['arg2']}"
-                for r in sample['relations']
-            ]
-            
-            family_samples.append({
-                'text': sample['text'],
-                'entities': entities_info,
-                'relations': relations_info
-            })
-    
-    return family_samples
-
 if __name__ == "__main__":
     model, tokenizer = train_model()
 
@@ -859,12 +878,14 @@ if __name__ == "__main__":
         print("\n" + "="*80)
         print(f"Processing text: '{text}'")
         result = predict(text, model, tokenizer)
-        print("\nEntities:")
-        for e in result['entities']:
-            print(f"{e['type']}: {e['text']}")
-        print("\nRelations:")
-        for r in result['relations']:
-            print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (conf: {r['confidence']:.2f})")
+        print(visualize_prediction_colored(result))
+
+        # print("\nEntities:")
+        # for e in result['entities']:
+        #     print(f"{e['type']}: {e['text']}")
+        # print("\nRelations:")
+        # for r in result['relations']:
+        #     print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (conf: {r['confidence']:.2f})")
 
     # Для загрузки модели
     loaded_model = NERRelationModel.from_pretrained("saved_model")
