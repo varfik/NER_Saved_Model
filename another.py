@@ -364,7 +364,7 @@ class NERELDataset(Dataset):
                     entity_type = type_and_span[0]
 
                     if entity_type not in ENTITY_TYPES:
-                        print(f"Неизвестный тип сущности: {entity_typen}")
+                        print(f"Неизвестный тип сущности: {entity_type}")
                         continue
                     try:
                         start = int(type_and_span[1])
