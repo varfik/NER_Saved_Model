@@ -84,10 +84,11 @@ class NERRelationModel(nn.Module):
         
         # BERT encoder
         self.bert = AutoModel.from_pretrained(model_name)
+        hidden_size = self.bert.config.hidden_size
         
         # NER Head with CRF
         self.ner_classifier = nn.Sequential(
-            nn.Linear(self.bert.config.hidden_size, 256),
+            nn.Linear(hidden_size, 256),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(256, num_ner_labels)
