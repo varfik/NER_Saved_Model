@@ -64,10 +64,12 @@ VALID_COMB = {
 RELATION_TYPES_INV = {v: k for k, v in RELATION_TYPES.items()}
 
 class NERRelationModel(nn.Module):
-    def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=len(ENTITY_TYPES)*2+1, num_rel_labels=len(RELATION_TYPES)):
+    def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=len(ENTITY_TYPES)*2+1, num_rel_labels=len(RELATION_TYPES), relation_types=None, entity_types=None):
         super().__init__()
         # Initialize NER labels (0=O, 1=B-PER, 2=I-PER, ..., 9=B-LOC, 10=I-LOC)
-        self.num_ner_labels = num_ner_labels 
+        self.relation_types = relation_types
+        self.entity_types = entity_types
+        self.num_ner_labels = num_ner_labels
         self.num_rel_labels = num_rel_labels
         
         # BERT encoder
@@ -81,9 +83,8 @@ class NERRelationModel(nn.Module):
             nn.Linear(256, num_ner_labels)
         )
         self.crf = CRF(num_ner_labels, batch_first=True)
-        
-        # Graph attention network components (GAT)
-        # Improved GAT architecture
+
+        #  GAT for entity-level graph
         self.gat1 = GATConv(
             self.bert.config.hidden_size, 
             128, 
@@ -101,240 +102,130 @@ class NERRelationModel(nn.Module):
         )
         self.norm2 = nn.LayerNorm(64)
         # Concatenate heads from first layer
-    
-         # Relation classifiers with type-specific architectures
-        self.rel_classifiers = nn.ModuleDict({
-            'WORKS_AS': self._build_relation_classifier(input_dim=64*2, hidden_dim=256),
-            'MEMBER_OF': self._build_relation_classifier(input_dim=64*2, hidden_dim=256),
-            'FOUNDED_BY': self._build_relation_classifier(input_dim=64*2, hidden_dim=256),
-            'SPOUSE': self._build_symmetric_classifier(input_dim=64*2, hidden_dim=256),
-            'PARENT_OF': self._build_relation_classifier(input_dim=64*2, hidden_dim=256),
-            'SIBLING': self._build_symmetric_classifier(input_dim=64*2, hidden_dim=256),
-            'PART_OF': self._build_relation_classifier(input_dim=64*2, hidden_dim=256),    
-            'WORKPLACE': self._build_relation_classifier(input_dim=64*2, hidden_dim=256),    
-            'RELATIVE': self._build_symmetric_classifier(input_dim=64*2, hidden_dim=256) 
-        })
+
+        # Embeddings
+        self.entity_type_emb = nn.Embedding(len(entity_types), 32)
+        self.rel_type_emb = nn.Embedding(self.num_rel_labels, 32)
+
+        self.rel_classifier = nn.Sequential(
+            nn.Linear(64 * 2 + 32 + hidden_size, 256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 1)
+        )
 
         self._init_weights()
 
-    def _build_relation_classifier(self, input_dim, hidden_dim):
-        return nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim, 1)
-        )
-
-    def _build_symmetric_classifier(self, input_dim, hidden_dim):
-        """For symmetric relations like SPOUSE and SIBLING"""
-        return nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim, 1)
-        )
-
     def _init_weights(self):
-        for module in [self.ner_classifier, *self.rel_classifiers.values()]:
-            if isinstance(module, nn.Sequential):
-                for submodule in module:
-                    if isinstance(submodule, nn.Linear):
-                        nn.init.xavier_uniform_(submodule.weight)
-                        nn.init.constant_(submodule.bias, 0)
+        for m in self.rel_classifier:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.constant_(m.bias, 0)
 
     def forward(self, input_ids, attention_mask, ner_labels=None, rel_data=None):
         device = input_ids.device
         outputs = self.bert(input_ids, attention_mask=attention_mask)
-        sequence_output = outputs.last_hidden_state
-    
-        rel_probs = defaultdict(list)
-        total_loss = 0
+        sequence_output = outputs.last_hidden_state # [B, T, H]
+        cls_token = sequence_output[:, 0, :]  # [B, H]
 
-        # NER prediction with CRF
+        # NER with CRF
         ner_logits = self.ner_classifier(sequence_output)
-
-        # NER loss
+        loss = 0
         if ner_labels is not None:
             mask = attention_mask.bool()
             ner_loss = -self.crf(ner_logits, ner_labels, mask=mask, reduction='mean')
-            total_loss += ner_loss
+            loss += ner_loss
+
+        rel_probs = defaultdict(list)
 
         if rel_data and self.training:
-            total_rel_loss = 0
-            rel_correct = 0
-            rel_total = 0
-            rel_targets = defaultdict(list)
-
             for batch_idx, sample in enumerate(rel_data):
-                if sample['pairs'].numel() == 0:
+                if not sample['pairs']:
                     print(f"Пропуск примера {batch_idx}: нет пар отношений")
                     continue
-        
-                # Get valid entities with type information
-                valid_entities = [
-                    e for e in sample['entities'] 
-                    if isinstance(e, dict) and 'start' in e and 'end' in e and 'type' in e
-                ]
-                
-                if len(valid_entities) < 2:
+
+                entities = [e for e in sample['entities'] if 'start' in e and 'end' in e]
+                if len(entities) < 2:
                     print(f"Пропуск примера {batch_idx}: недостаточно сущностей ({len(valid_entities)})")
                     continue
 
-                # print(f"\nОбработка примера {batch_idx}:")
-                # print(f"Сущности: {[(e['type'], e['id']) for e in valid_entities]}")
-                # print(f"Пары отношений: {sample['pairs']}")
-                # print(f"Метки отношений: {sample['labels']}") 
+                # Entity embeddings: attention pooling + type embedding
+                entity_embeds, entity_types = [], []
+                for e in entities:
+                    start = e['start']
+                    end = e['end']
+                    token_embeds = sequence_output[batch_idx, start:end + 1]
+                    attention_scores = token_embeds @ token_embeds.mean(dim=0)
+                    attention_weights = torch.softmax(attention_scores, dim=0)
+                    pooled = torch.sum(token_embeds * attention_weights.unsqueeze(-1), dim=0)
 
-                # Create entity embeddings
-                entity_embeddings = []
-                entity_types = []
-                for e in valid_entities:
-                    start = min(e['start'], sequence_output.size(1)-1)
-                    end = min(e['end'], sequence_output.size(1)-1)
-                    entity_embed = sequence_output[batch_idx, start:end+1].mean(dim=0)
-                    entity_embeddings.append(entity_embed)
-                    entity_types.append(e['type'])
-                
-                # Build graph
-                edge_pairs = []
-                for i, e1 in enumerate(valid_entities):
-                    for j, e2 in enumerate(valid_entities):
-                        if i != j:
-                            # Check if this pair is valid for any relation type
-                            for rel_type, valid_pairs in VALID_COMB.items():
-                                if (e1['type'], e2['type']) in valid_pairs:
-                                    edge_pairs.append([i, j])
-                                    break  # Only need one edge per pair
+                    type_idx = self.entity_types.index(e['type'])
+                    type_emb = self.entity_type_emb(torch.tensor(type_idx, device=device))
+                    final_embed = pooled + type_emb
+                    entity_embeds.append(final_embed)
+                    entity_types.append(type_idx)
 
-                edge_index = torch.tensor(edge_pairs, dtype=torch.long).t().contiguous().to(device)
-                
-                x = torch.stack(entity_embeddings).to(device)
-                
-                # Apply improved GAT with normalization
+                x = torch.stack(entity_embeds)
+                edge_pairs = [[i, j] for i in range(len(x)) for j in range(len(x)) if i != j]
+                edge_index = torch.tensor(edge_pairs).t().to(device)
+
+                # GAT
                 x = self.gat1(x, edge_index)
                 x = self.norm1(x)
                 x = F.elu(x)
-                x = F.dropout(x, p=0.3, training=self.training)
                 x = self.gat2(x, edge_index)
                 x = self.norm2(x)
                 x = F.elu(x)
 
-                # Create entity index map
-                entity_indices = {e['id']: i for i, e in enumerate(valid_entities)}
-                
-                for rel_type in RELATION_TYPES:
-                    pos_count = 0
+                # Entity ID map
+                id_map = {e['id']: i for i, e in enumerate(entities)}
 
-                    # Collect positive examples
-                    for (e1_idx, e2_idx), label in zip(sample['pairs'], sample['labels']):
-                        if label == RELATION_TYPES[rel_type]:
-                            if e1_idx < len(valid_entities) and e2_idx < len(valid_entities):
-                                i = e1_idx
-                                j = e2_idx
+                # Collect relation training data
+                for (i1, i2), label in zip(sample['pairs'], sample['labels']):
+                    if i1 not in id_map or i2 not in id_map:
+                        continue
 
-                                # Для FOUNDED_BY меняем направление
-                                if rel_type == 'FOUNDED_BY':
-                                    i, j = j, i
+                    rel_type_idx = label
+                    rel_type_tensor = self.rel_type_emb(torch.tensor(rel_type_idx, device=device))
 
-                                pair_features = torch.cat([x[i], x[j]])
-                                rel_probs[rel_type].append(self.rel_classifiers[rel_type](pair_features))
-                                rel_targets[rel_type].append(1.0)
-                                pos_count += 1
+                    idx1, idx2 = id_map[i1], id_map[i2]
+                    if self.relation_types[rel_type_idx] == 'FOUNDED_BY':
+                        idx1, idx2 = idx2, idx1  # flip
 
-                    print(f"\nОбработка примера {batch_idx}:")
-                    print(f"Тип отношения {rel_type}: найдено {pos_count} положительных примеров")
+                    pair_vec = torch.cat([x[idx1], x[idx2], rel_type_tensor, cls_token[batch_idx]])
+                    score = self.rel_classifier(pair_vec)
+                    rel_probs[rel_type_idx].append((score, 1.0))
 
-                    # Generate negative examples for this relation type
-                    neg_pairs = self._generate_negative_examples(
-                        entity_embeddings=x, 
-                        entity_types=entity_types, 
-                        rel_type=rel_type,
-                        pos_indices={(i,j) for (i,j), label in zip(sample['pairs'], sample['labels']) 
-                                    if label == RELATION_TYPES[rel_type]},
-                        ratio=5
-                    )
+                # Generate negative samples
+                for rel_type_idx, rel_type in enumerate(self.relation_types):
+                    pos_indices = {(id_map[i1], id_map[i2]) for (i1, i2), l in zip(sample['pairs'], sample['labels'])
+                                   if l == rel_type_idx and i1 in id_map and i2 in id_map}
 
-                    if neg_pairs:
-                        neg_features, neg_targets = neg_pairs
-                        rel_probs[rel_type].extend(neg_features)
-                        rel_targets[rel_type].extend(neg_targets)
-                        print(f"Добавлено {len(neg_targets)} отрицательных примеров для {rel_type}")
+                    all_pairs = [(i, j) for i in range(len(x)) for j in range(len(x))
+                                 if i != j and (i, j) not in pos_indices]
+                    sampled = random.sample(all_pairs, min(5 * len(pos_indices), len(all_pairs)))
 
-                    else:
-                        print(f"Не удалось сгенерировать отрицательные примеры для {rel_type}")
+                    for i, j in sampled:
+                        rel_type_tensor = self.rel_type_emb(torch.tensor(rel_type_idx, device=device))
+                        pair_vec = torch.cat([x[i], x[j], rel_type_tensor, cls_token[batch_idx]])
+                        score = self.rel_classifier(pair_vec)
+                        rel_probs[rel_type_idx].append((score, 0.0))
 
+            # Compute relation loss
+            for rel_type_idx, pairs in rel_probs.items():
+                if not pairs:
+                    continue
+                logits, labels = zip(*pairs)
+                logits = torch.cat(logits).view(-1)
+                labels = torch.tensor(labels, device=device, dtype=torch.float)
 
-                    # Calculate loss for this relation type
-                    if rel_probs[rel_type]:
-                        min_len = min(len(rel_probs[rel_type]), len(rel_targets[rel_type]))
-                        probs_tensor = torch.cat(rel_probs[rel_type][:min_len]).view(-1)
-                        targets_tensor = torch.tensor(rel_targets[rel_type][:min_len], dtype=torch.float, device=device)
+                pos_weight = torch.tensor(
+                    [3.0 if self.relation_types[rel_type_idx] in ['SPOUSE', 'SIBLING'] else 1.0],
+                    device=device)
+                rel_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(logits, labels)
+                loss += rel_loss
 
-                        if rel_type in ['SPOUSE', 'SIBLING', 'RELATIVE']:
-                            pos_weight = torch.tensor([3.0], device=device)
-                        else:
-                            pos_weight = torch.tensor([1.0], device=device)
-                        rel_loss =nn.BCEWithLogitsLoss(pos_weight=pos_weight)(
-                             probs_tensor, targets_tensor)
-                        total_loss += rel_loss
-
-                        # Отладочная информация
-                        preds = (torch.sigmoid(probs_tensor) > 0.5).long()
-                        correct = (preds == targets_tensor.long()).sum().item()
-                        accuracy = correct / len(targets_tensor)
-
-                        print(f"Отношение {rel_type}: loss={rel_loss.item():.4f}, accuracy={accuracy:.2%}, "
-                            f"pos/neg={sum(targets_tensor)}/{len(targets_tensor)-sum(targets_tensor)}")
-
-
-        return {
-            'ner_logits': ner_logits,
-            'rel_probs': rel_probs,
-            'loss': total_loss if total_loss != 0 else None
-        }
-
-    def _generate_negative_examples(self, entity_embeddings, entity_types, rel_type,  pos_indices=None, ratio=0.5):
-        """Generate valid negative examples for specific relation type"""
-        device = entity_embeddings.device
-        neg_probs = []
-        neg_targets = []
-        
-        if pos_indices is None:
-            pos_indices = set()
-        
-        # Get valid pairs for this relation type from VALID_COMB
-        valid_pairs = []
-        for i, e1 in enumerate(entity_types):
-            for j, e2 in enumerate(entity_types):
-                if i != j and (e1, e2) in VALID_COMB.get(rel_type, []):
-                     # For symmetric relations, consider only unique pairs
-                    if rel_type in ['SPOUSE', 'SIBLING', 'RELATIVE']:
-                        if (min(i,j), max(i,j)) not in valid_pairs:
-                            valid_pairs.append((min(i,j), max(i,j)))
-                    else:
-                        valid_pairs.append((i, j))
-        
-        # Exclude positive examples
-        valid_pairs = [p for p in valid_pairs if p not in pos_indices]
-        
-        # Sample negative examples
-        num_samples = min(len(valid_pairs), max(5 * len(pos_indices), 5))
-        sampled_pairs = random.sample(valid_pairs, num_samples) if valid_pairs else []
-        
-        for i, j in sampled_pairs:
-            # For FOUNDED_BY we need to reverse the direction
-            if rel_type == 'FOUNDED_BY':
-                i, j = j, i
-            
-            pair_features = torch.cat([entity_embeddings[i], entity_embeddings[j]])
-            neg_probs.append(self.rel_classifiers[rel_type](pair_features))
-            neg_targets.append(0.0)
-
-        if neg_probs:
-            return torch.stack(neg_probs).view(-1, 1), torch.tensor(neg_targets, device=device)
-        return None
+        return {'ner_logits': ner_logits, 'rel_probs': rel_probs, 'loss': loss if loss != 0 else None}
 
     def save_pretrained(self, save_dir, tokenizer=None):
         """Сохраняет модель, конфигурацию и токенизатор в указанную директорию."""
@@ -626,8 +517,10 @@ def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Инициализация модели и токенизатора
+    entity_types = [etype for etype, _ in sorted(ENTITY_TYPES.items(), key=lambda x: x[1])]
+    relation_types = [rtype for rtype, _ in sorted(RELATION_TYPES.items(), key=lambda x: x[1])]
     tokenizer = AutoTokenizer.from_pretrained("DeepPavlov/rubert-base-cased")
-    model = NERRelationModel().to(device)
+    model = NERRelationModel(relation_types=relation_types, entity_types=entity_types).to(device)
 
     # Загрузка данных
     train_dataset = NERELDataset("NEREL/NEREL-v1.1/train", tokenizer)
