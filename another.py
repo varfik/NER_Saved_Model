@@ -222,6 +222,11 @@ class NERRelationModel(nn.Module):
                         score = self.rel_classifier(pair_vec)
                         rel_probs[rel_type_idx].append((score, 0.0))
 
+                pos_pairs = sum(len([l for l in item['labels'] if l > 0]) for item in batch['rel_data'])
+                print(f"Batch stats - Entities: {sum(len(x['entities']) for x in batch['rel_data'])}, "
+                      f"Positive pairs: {pos_pairs}, "
+                      f"Negative pairs: {sum(len(x['labels']) for x in batch['rel_data'])} - {pos_pairs}")
+
             # Compute relation loss
             for rel_type_idx, pairs in rel_probs.items():
                 if not pairs:
@@ -424,6 +429,7 @@ class NERELDataset(Dataset):
         )
         
         # Initialize NER labels (0=O, 1=B-PER, 2=I-PER, 3=B-PROF, 4=I-PROF, 5=B-ORGANIZATION, 6=I-ORGANIZATION, 7=B-FAMILY, 8=I-FAMILY)
+        num_labels = max(ENTITY_TYPES.values()) * 2 + 1
         ner_labels = torch.zeros(self.max_length, dtype=torch.long)
         offset_mapping = encoding['offset_mapping'][0]
         token_entities = []
@@ -437,14 +443,18 @@ class NERELDataset(Dataset):
                 if not (end <= entity['start'] or start >= entity['end']):
                     matched_tokens.append(i)
             if not matched_tokens:
+                print(f"[WARN] Entity alignment failed: "
+                      f"Entity: '{entity['text']}' ({entity['type']}), "
+                      f"Span: {entity['start']}-{entity['end']}, "
+                      f"Text: '{text[max(0, entity['start'] - 10):min(len(text), entity['end'] + 10)]}'")
                 continue
 
             ent_type_id = ENTITY_TYPES[entity['type']]
             b_label = ent_type_id * 2 - 1
             i_label = ent_type_id * 2
             ner_labels[matched_tokens[0]] = b_label
-            if len(matched_tokens) > 1:
-                ner_labels[matched_tokens[1:]] = i_label
+            for idx in matched_tokens[1:]:
+                ner_labels[idx] = i_label
             token_entities.append({
                 'start': matched_tokens[0],
                 'end': matched_tokens[-1],
@@ -483,9 +493,8 @@ class NERELDataset(Dataset):
             for j in range(num_entities):
                 if i == j:
                     continue
-                pair = (min(i, j), max(i, j)) if (token_entities[i]['type'],
-                                                  token_entities[j]['type']) in SYMMETRIC_RELATIONS else (i, j)
-                if pair in used_pairs:
+                pair = (min(i, j), max(i, j))
+                if (i, j) in used_pairs:
                     continue
                 rel_data['pairs'].append(pair)
                 rel_data['labels'].append(0)  # 0 — нет отношения
@@ -499,9 +508,6 @@ class NERELDataset(Dataset):
             'text': text,
             'offset_mapping': encoding['offset_mapping'].squeeze(0)
         }
-
-        if self.include_offsets:
-            output['offset_mapping'] = offset_mapping
 
         return output
 
@@ -553,7 +559,7 @@ def train_model():
         sample_weights.append(3.0 if has_relations else 1.0)
     
     sampler = WeightedRandomSampler(sample_weights, len(train_dataset), replacement=True)
-    train_loader = DataLoader(train_dataset, batch_size=8, collate_fn=collate_fn, sampler=sampler)
+    train_loader = DataLoader(train_dataset, batch_size=16, collate_fn=collate_fn, sampler=sampler)
 
     # Optimizer with different learning rates
     optimizer = AdamW([
@@ -566,8 +572,6 @@ def train_model():
     ], weight_decay=1e-5)
     
     # Training loop
-    best_ner_f1 = 0
-    # Цикл обучения
     for epoch in range(2):
         model.train()
         epoch_loss = 0
@@ -588,12 +592,14 @@ def train_model():
                 ner_labels=ner_labels,
                 rel_data=batch['rel_data'] 
             )
-            
-            if outputs['loss'] is not None:
-                outputs['loss'].backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                epoch_loss += outputs['loss'].item()
+            if outputs['loss'] is None:
+                print(f"[WARN] Skipping batch due to missing loss")
+                continue
+
+            outputs['loss'].backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            epoch_loss += outputs['loss'].item()
             
             # NER metrics
             with torch.no_grad():
@@ -610,31 +616,23 @@ def train_model():
                     
                     ner_correct += (pred == true).sum().item()
                     ner_total += seq_len
-            
-            # Вычисление метрик для отношений
-            if outputs['rel_probs']:
-                for rel_type, probs in outputs['rel_probs'].items():
-                    if len(probs) > 0:
-                        # Убедимся, что probs - это тензор
-                        if isinstance(probs, list):
-                            probs = torch.cat([p.view(-1) for p in probs if p is not None]) if len(probs) > 0 else torch.tensor([], device=device)
-                        
-                        if len(probs) > 0:
-                            preds = (torch.sigmoid(probs) > 0.5).long()
-                            
-                            # Собираем метки для этого типа отношений
-                            targets = []
-                            for item in batch['rel_data']:
-                                if 'labels' in item and len(item['labels']) > 0:
-                                    # Фильтруем метки для текущего типа отношений
-                                    rel_labels = [l for l, t in zip(item['labels'], item.get('rel_types', [])) if t == rel_type]
-                                    targets.extend(rel_labels)
-                            
-                            if len(targets) > 0:
-                                # Обрезаем до минимальной длины
-                                min_len = min(len(preds), len(targets))
-                                rel_correct += (preds[:min_len] == torch.tensor(targets[:min_len], device=device)).sum().item()
-                                rel_total += min_len
+
+            # NEW: Relation metrics calculation
+            if 'rel_logits' in outputs:
+                rel_logits = outputs['rel_logits']  # shape: (B, N_pairs, num_rel_types)
+                for i, rel_sample in enumerate(batch['rel_data']):
+                    if 'labels' in rel_sample and len(rel_sample['labels']) > 0:
+                        # Get predictions for valid pairs
+                        valid_pairs = min(rel_logits[i].shape[0], len(rel_sample['labels']))
+                        if valid_pairs == 0:
+                            continue
+
+                        logits = rel_logits[i][:valid_pairs]  # shape: (valid_pairs, num_rel_types)
+                        preds = logits.argmax(dim=1)  # predicted class per pair
+                        targets = torch.tensor(rel_sample['labels'][:valid_pairs], device=device)
+
+                        rel_correct += (preds == targets).sum().item()
+                        rel_total += valid_pairs
 
         # Evaluation metrics
         ner_acc = ner_correct / ner_total if ner_total > 0 else 0
