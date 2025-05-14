@@ -151,7 +151,7 @@ class NERRelationModel(nn.Module):
 
         if rel_data and self.training:
             for batch_idx, sample in enumerate(rel_data):
-                if not sample['pairs']:
+                if sample['pairs'].numel() == 0:
                     print(f"Пропуск примера {batch_idx}: нет пар отношений")
                     continue
 
