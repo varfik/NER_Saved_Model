@@ -561,7 +561,7 @@ def train_model():
     {'params': model.crf.parameters(), 'lr': 1e-4},
     {'params': model.gat1.parameters(), 'lr': 3e-4},
     {'params': model.gat2.parameters(), 'lr': 3e-4},
-    {'params': model.rel_classifiers.parameters(), 'lr': 5e-4}
+    {'params': model.rel_classifier.parameters(), 'lr': 5e-4}
     ], weight_decay=1e-5)
     
     # Training loop
