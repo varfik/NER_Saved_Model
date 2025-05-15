@@ -222,7 +222,7 @@ class NERRelationModel(nn.Module):
                         score = self.rel_classifier(pair_vec)
                         rel_probs[rel_type_idx].append((score, 0.0))
 
-                pos_pairs = sum(len([l for l in item['labels'] if l > 0]) for item in batch['rel_data'])
+                pos_pairs = sum(len([l for l in item['labels'] if l > 0]) for item in rel_data)
                 print(f"Batch stats - Entities: {sum(len(x['entities']) for x in batch['rel_data'])}, "
                       f"Positive pairs: {pos_pairs}, "
                       f"Negative pairs: {sum(len(x['labels']) for x in batch['rel_data'])} - {pos_pairs}")
@@ -427,9 +427,7 @@ class NERELDataset(Dataset):
             return_offsets_mapping=True,
             return_tensors='pt'
         )
-        
-        # Initialize NER labels (0=O, 1=B-PER, 2=I-PER, 3=B-PROF, 4=I-PROF, 5=B-ORGANIZATION, 6=I-ORGANIZATION, 7=B-FAMILY, 8=I-FAMILY)
-        num_labels = max(ENTITY_TYPES.values()) * 2 + 1
+
         ner_labels = torch.zeros(self.max_length, dtype=torch.long)
         offset_mapping = encoding['offset_mapping'][0]
         token_entities = []
