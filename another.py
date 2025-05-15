@@ -415,11 +415,22 @@ class NERELDataset(Dataset):
 
 
     def _find_best_span(self, entity_text, text, orig_start):
+        # First try exact match
         candidates = [
             (m.start(), m.end()) for m in re.finditer(re.escape(entity_text), text)
         ]
+
+        # If no exact match, try to find the shortest span containing the entity text
+        if not candidates:
+            candidates = [
+                (m.start(), m.end())
+                for m in re.finditer(re.escape(entity_text.split()[-1]), text)
+                if text[m.start():m.end()].endswith(entity_text.split()[-1])
+            ]
+
         if not candidates:
             return None
+
         return min(candidates, key=lambda span: abs(span[0] - orig_start))
 
     def _parse_ann_file(self, ann_path, text):
@@ -525,7 +536,7 @@ class NERELDataset(Dataset):
                 if start <= entity['end'] and end >= entity['start']:
                     matched_tokens.append(i)
             if not matched_tokens:
-                recovered = self.find_best_span(entity['text'], text, entity['start'])
+                recovered = self._find_best_span(entity['text'], text, entity['start'])
                 if recovered:
                     entity['start'], entity['end'] = recovered
                     for i, (start, end) in enumerate(offset_mapping):
