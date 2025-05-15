@@ -415,7 +415,7 @@ class NERELDataset(Dataset):
         return samples
 
 
-    def _find_best_span(entity_text, text, approx_start):
+    def _find_best_span(self, entity_text, text, approx_start):
         # Ищем все вхождения entity_text в тексте
         matches = [
             (m.start(), m.end())
