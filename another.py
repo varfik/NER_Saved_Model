@@ -413,24 +413,40 @@ class NERELDataset(Dataset):
         
         return samples
 
-
     def _find_best_span(self, entity_text, text, orig_start):
-        # First try exact match
+        import unicodedata
+        entity_text = unicodedata.normalize("NFC", entity_text.replace('\u00A0', ' '))
+        text = unicodedata.normalize("NFC", text.replace('\u00A0', ' '))
+
+        # 1. Попробуй точное совпадение
         candidates = [
             (m.start(), m.end()) for m in re.finditer(re.escape(entity_text), text)
         ]
 
-        # If no exact match, try to find the shortest span containing the entity text
-        if not candidates:
-            candidates = [
-                (m.start(), m.end())
-                for m in re.finditer(re.escape(entity_text.split()[-1]), text)
-                if text[m.start():m.end()].endswith(entity_text.split()[-1])
-            ]
+        # 2. Если не нашёл — пробуем первые и последние слова
+        if not candidates and len(entity_text.split()) > 1:
+            first_word = entity_text.split()[0]
+            last_word = entity_text.split()[-1]
+
+            fallback_candidates = []
+            for word in [first_word, last_word]:
+                for m in re.finditer(re.escape(word), text):
+                    start, end = m.start(), m.end()
+                    context_window = text[start:start + len(entity_text) + 10]
+                    if entity_text in context_window:
+                        idx = context_window.find(entity_text)
+                        fallback_start = start + idx
+                        fallback_end = fallback_start + len(entity_text)
+                        fallback_candidates.append((fallback_start, fallback_end))
+
+            candidates = fallback_candidates
 
         if not candidates:
+            rint(f"[WARN] Entity span not found: '{entity_text}' around position {orig_start}")
+            print(f"Snippet: {text[orig_start - 50:orig_start + 50]}")
             return None
 
+        # 3. Верни ближайший к orig_start
         return min(candidates, key=lambda span: abs(span[0] - orig_start))
 
     def _parse_ann_file(self, ann_path, text):
@@ -540,7 +556,7 @@ class NERELDataset(Dataset):
                 if recovered:
                     entity['start'], entity['end'] = recovered
                     for i, (start, end) in enumerate(offset_mapping):
-                        if start <= entity['end'] and end >= entity['start']:
+                        if start < entity['end'] and end > entity['start']:
                             matched_tokens.append(i)
             if not matched_tokens:
                 print(f"[WARN] Entity alignment failed: Entity: '{entity['text']}' ({entity['type']}), "
