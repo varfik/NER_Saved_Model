@@ -465,7 +465,7 @@ class NERELDataset(Dataset):
                         print(f"  found:    '{extracted_text}'")
                         print(f"  raw span: '{text[start:end]}'")
                         print(f"  context:  '{text[start - 20:end + 20].replace('\\n', '⏎')}'")
-                        best_span = _find_best_span(entity_text, text, start)
+                        best_span = self._find_best_span(entity_text, text, start)
                         if best_span:
                             start, end = best_span
                         else:
