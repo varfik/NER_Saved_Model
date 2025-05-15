@@ -742,10 +742,17 @@ def train_model():
                 for rel_type, pairs in outputs['rel_logits'].items():
                     if pairs:
                         logits, labels = zip(*pairs)
-                        preds = torch.sigmoid(torch.cat(logits)) > 0.5
-                        labels = torch.tensor(labels, device=device)
+                        logits = torch.cat(logits).squeeze()
+                        preds = (torch.sigmoid(logits) > 0.5).float()
+                        labels = torch.tensor(labels, dtype=torch.float32, device=device)
+
+                        print(f"[DEBUG] Relation type: {rel_type}")
+                        print(f"[DEBUG] Predicted: {preds.tolist()}")
+                        print(f"[DEBUG] Labels: {labels.tolist()}")
+                        print(f"[DEBUG] Positives: {labels.sum().item()} / {len(labels)}\n")
+
                         rel_correct += (preds == labels).sum().item()
-                        rel_total += len(labels)
+                        rel_total += labels.size(0)
 
         # Evaluation metrics
         ner_acc = ner_correct / ner_total if ner_total > 0 else 0
