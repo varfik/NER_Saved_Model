@@ -16,7 +16,7 @@ from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
-import re
+import regex
 from termcolor import colored
 
 # Цвета для визуализации разных типов сущностей
@@ -413,6 +413,19 @@ class NERELDataset(Dataset):
             samples.append({'text': text, 'entities': entities, 'relations': relations})
         
         return samples
+
+
+    def _find_best_span(entity_text, text, approx_start):
+        # Ищем все вхождения entity_text в тексте
+        matches = [
+            (m.start(), m.end())
+            for m in regex.finditer(regex.escape(entity_text), text, overlapped=True)
+        ]
+        if not matches:
+            return None
+
+        # Из всех совпадений выбираем ближайшее к приблизительному `start`
+        return min(matches, key=lambda span: abs(span[0] - approx_start))
     
     def _parse_ann_file(self, ann_path, text):
         entities, relations = [], []
@@ -442,21 +455,22 @@ class NERELDataset(Dataset):
                     except ValueError:
                         continue
 
-                    entity_text = parts[2].strip()
+                    entity_text = parts[2]
 
-                    extracted_text = text[start:end].strip()
+                    extracted_text = text[start:end]
                     if extracted_text != entity_text:
-                        # Попробуем найти ВСЕ возможные вхождения entity_text в тексте
-                        found_spans = [
-                            (m.start(), m.end())
-                            for m in re.finditer(re.escape(entity_text), text)
-                        ]
-                        # Попробуем найти ближайший спан к оригинальному
-                        if found_spans:
-                            best_span = min(found_spans, key=lambda span: abs(span[0] - start))
+                        print(f"[DEBUG] Misalignment detected:")
+                        print(f"  entity_id: {entity_id}")
+                        print(f"  expected: '{entity_text}'")
+                        print(f"  found:    '{extracted_text}'")
+                        print(f"  raw span: '{text[start:end]}'")
+                        print(f"  context:  '{text[start - 20:end + 20].replace('\\n', '⏎')}'")
+                        best_span = _find_best_span(entity_text, text, start)
+                        if best_span:
                             start, end = best_span
                         else:
-                            print(f"[WARN] Entity alignment failed: '{entity_text}' not found in text.")
+                            print(f"[WARN] Entity alignment failed: Entity: '{entity_text}' ({entity_type}), "
+                                  f"Span: {start}-{end}, Text: '{text[start - 10:end + 10]}'")
                             continue
 
                     entity = {
