@@ -82,6 +82,7 @@ class NERRelationModel(nn.Module):
     def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=len(ENTITY_TYPES)*2+1, num_rel_labels=len(RELATION_TYPES), relation_types=None, entity_types=None):
         super().__init__()
         # Initialize NER labels (0=O, 1=B-PER, 2=I-PER, ..., 9=B-LOC, 10=I-LOC)
+        self.entity_type_to_idx = {etype: idx for idx, etype in enumerate(entity_types)}
         self.relation_types = relation_types
         self.entity_types = entity_types
         self.num_ner_labels = num_ner_labels
@@ -225,7 +226,7 @@ class NERRelationModel(nn.Module):
             pooled = torch.sum(token_embeds * attention_weights.unsqueeze(-1), dim=0)
 
             try:
-                type_idx = self.entity_types.index(e['type'])
+                type_idx = self.entity_type_to_idx.get(e['type'], -1)
             except ValueError:
                 if self.training:
                     print(f"Неизвестный тип сущности: {e['type']}")
@@ -439,14 +440,24 @@ class NERELDataset(Dataset):
                         end = int(type_and_span[-1])
                     except ValueError:
                         continue
-                    entity_text = parts[2]
-                    if text[start:end] != entity_text:
-                        found_pos = text.find(entity_text)
-                        if found_pos != -1:
-                            start = found_pos
-                            end = found_pos + len(entity_text)
+
+                    entity_text = parts[2].strip()
+
+                    extracted_text = text[start:end].strip()
+                    if extracted_text != entity_text:
+                        # Попробуем найти ВСЕ возможные вхождения entity_text в тексте
+                        found_spans = [
+                            (m.start(), m.end())
+                            for m in re.finditer(re.escape(entity_text), text)
+                        ]
+                        # Попробуем найти ближайший спан к оригинальному
+                        if found_spans:
+                            best_span = min(found_spans, key=lambda span: abs(span[0] - start))
+                            start, end = best_span
                         else:
+                            print(f"[WARN] Entity alignment failed: '{entity_text}' not found in text.")
                             continue
+
                     entity = {
                         'id': entity_id,
                         'type': entity_type,
@@ -858,53 +869,49 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
             entity_embeddings.append(entity_embed)
         
         entity_embeddings = torch.stack(entity_embeddings).to(device)
-        
-        # Build graph
-        edge_pairs = []
-        for i, e1 in enumerate(entities):
-            for j, e2 in enumerate(entities):
-                if i != j:
-                    # Check if this pair is valid for any relation type
-                    for rel_type, valid_pairs in VALID_COMB.items():
-                        if (e1['type'], e2['type']) in valid_pairs:
-                            edge_pairs.append([i, j])
-                            break  # Only need one edge per pair
 
-        edge_index = torch.tensor(edge_pairs, dtype=torch.long).t().contiguous().to(device)
+        # Применяем GAT слои (как в forward)
+        edge_pairs = [[i, j] for i in range(len(entities)) for j in range(len(entities)) if i != j]
+        edge_index = torch.tensor(edge_pairs).t().to(device)
 
-        # Apply GAT
         x = model.gat1(entity_embeddings, edge_index)
+        x = model.norm1(x)
         x = F.elu(x)
-        x = F.dropout(x, p=0.3, training=False)
         x = model.gat2(x, edge_index)
+        x = model.norm2(x)
         x = F.elu(x)
-        
-        # Predict all possible relations
-        for rel_type in RELATION_TYPES:
+
+        # Предсказываем отношения с единым классификатором
+        relations = []
+        cls_token = sequence_output[:, 0, :].squeeze(0)
+
+        for rel_type, rel_type_idx in RELATION_TYPES.items():
             valid_combinations = VALID_COMB.get(rel_type, [])
+
             for i, e1 in enumerate(entities):
                 for j, e2 in enumerate(entities):
                     if i != j and (e1['type'], e2['type']) in valid_combinations:
-                            # For FOUNDED_BY we need to reverse the direction
-                            if rel_type == 'FOUNDED_BY':
-                                src, tgt = j, i
-                            else:
-                                src, tgt = i, j
-                            
-                            pair_features = torch.cat([x[src], x[tgt]])
-                            logit = model.rel_classifiers[rel_type](pair_features)
-                            prob = torch.sigmoid(logit).item()
-                        
-                            if prob > relation_threshold[rel_type]:
-                                relations.append({
-                                    'type': rel_type,
-                                    'arg1_id': entities[src]['id'],
-                                    'arg2_id': entities[tgt]['id'],
-                                    'arg1': entities[src],
-                                    'arg2': entities[tgt],
-                                    'confidence': prob
-                                })
-    
+                        # Для FOUNDED_BY меняем направление
+                        if rel_type == 'FOUNDED_BY':
+                            src, tgt = j, i
+                        else:
+                            src, tgt = i, j
+
+                        rel_type_tensor = model.rel_type_emb(torch.tensor(rel_type_idx, device=device))
+                        pair_vec = torch.cat([x[src], x[tgt], rel_type_tensor, cls_token])
+                        logit = model.rel_classifier(pair_vec)
+                        prob = torch.sigmoid(logit).item()
+
+                        if prob > relation_threshold.get(rel_type, 0.5):
+                            relations.append({
+                                'type': rel_type,
+                                'arg1_id': entities[src]['id'],
+                                'arg2_id': entities[tgt]['id'],
+                                'arg1': entities[src],
+                                'arg2': entities[tgt],
+                                'confidence': prob
+                            })
+
     # Remove duplicates and keep highest confidence
     unique_relations = {}
     for rel in relations:
