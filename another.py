@@ -17,6 +17,7 @@ from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
 import regex
+import unicodedata
 from termcolor import colored
 
 # Цвета для визуализации разных типов сущностей
@@ -506,7 +507,7 @@ class NERELDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
         text = sample['text']
-
+        text = unicodedata.normalize("NFC", text.replace('\u00A0', ' '))
         # Tokenize with subword information
         encoding = self.tokenizer(
             text,
@@ -527,13 +528,12 @@ class NERELDataset(Dataset):
             for i, (start, end) in enumerate(offset_mapping):
                 if start == end:
                     continue  # спецтокены
-                if not (end <= entity['start'] or start >= entity['end']):
+                if start <= entity['end'] and end >= entity['start']:
                     matched_tokens.append(i)
             if not matched_tokens:
-                print(f"[WARN] Entity alignment failed: "
-                      f"Entity: '{entity['text']}' ({entity['type']}), "
+                print(f"[WARN] Entity alignment failed: Entity: '{entity['text']}' ({entity['type']}), "
                       f"Span: {entity['start']}-{entity['end']}, "
-                      f"Text: '{text[max(0, entity['start'] - 10):min(len(text), entity['end'] + 10)]}'")
+                      f"Text segment: '{text[entity['start']:entity['end']]}'")
                 continue
 
             ent_type_id = ENTITY_TYPES[entity['type']]
