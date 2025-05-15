@@ -442,7 +442,7 @@ class NERELDataset(Dataset):
             candidates = fallback_candidates
 
         if not candidates:
-            rint(f"[WARN] Entity span not found: '{entity_text}' around position {orig_start}")
+            print(f"[WARN] Entity span not found: '{entity_text}' around position {orig_start}")
             print(f"Snippet: {text[orig_start - 50:orig_start + 50]}")
             return None
 
