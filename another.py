@@ -18,6 +18,7 @@ import numpy as np
 
 from termcolor import colored
 
+# Цвета для визуализации разных типов сущностей
 ENTITY_COLORS = {
     'PERSON': 'cyan',
     'PROFESSION': 'green',
@@ -26,7 +27,7 @@ ENTITY_COLORS = {
     'LOCATION': 'blue',
 }
 
-
+# Пороги уверенности для разных типов отношений
 RELATION_THRESHOLDS = {
     'WORKS_AS': 0.7,
     'MEMBER_OF': 0.7,
@@ -39,6 +40,7 @@ RELATION_THRESHOLDS = {
     'RELATIVE': 0.5
 }
 
+# Маппинг типов сущностей в числовые индексы
 ENTITY_TYPES = {
     'PERSON': 1,
     'PROFESSION': 2,
@@ -47,6 +49,7 @@ ENTITY_TYPES = {
     'LOCATION': 5
 }
 
+# Маппинг типов отношений в числовые индексы
 RELATION_TYPES = {
     'WORKS_AS': 1,
     'MEMBER_OF': 2,
@@ -59,6 +62,7 @@ RELATION_TYPES = {
     'RELATIVE': 9      
 }
 
+# Допустимые комбинации типов сущностей для каждого типа отношения
 VALID_COMB = {
     'WORKS_AS': [('PERSON', 'PROFESSION')],
     'MEMBER_OF': [('PERSON', 'ORGANIZATION')],
@@ -71,6 +75,7 @@ VALID_COMB = {
     'RELATIVE': [('PERSON', 'PERSON')]
 }
 
+# Обратный маппинг индексов в названия отношений
 RELATION_TYPES_INV = {v: k for k, v in RELATION_TYPES.items()}
 
 class NERRelationModel(nn.Module):
@@ -83,19 +88,20 @@ class NERRelationModel(nn.Module):
         self.num_rel_labels = num_rel_labels
         
         # BERT encoder
-        self.bert = AutoModel.from_pretrained(model_name)
+        self.bert = AutoModel.from_pretrained(model_name) # BERT-модель для эмбеддингов
         hidden_size = self.bert.config.hidden_size
         
         # NER Head with CRF
+        # Классификатор для NER
         self.ner_classifier = nn.Sequential(
             nn.Linear(hidden_size, 256),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(256, num_ner_labels)
         )
-        self.crf = CRF(num_ner_labels, batch_first=True)
+        self.crf = CRF(num_ner_labels, batch_first=True) # CRF слой для NER
 
-        #  GAT for entity-level graph
+        # Графовые слои внимания (GAT)
         self.gat1 = GATConv(
             self.bert.config.hidden_size, 
             128, 
@@ -114,10 +120,11 @@ class NERRelationModel(nn.Module):
         self.norm2 = nn.LayerNorm(64)
         # Concatenate heads from first layer
 
-        # Embeddings
+        # Эмбеддинги для типов сущностей и отношений
         self.entity_type_emb = nn.Embedding(len(entity_types), 768)
         self.rel_type_emb = nn.Embedding(self.num_rel_labels, 32)
 
+        # Классификатор отношений
         self.rel_classifier = nn.Sequential(
             nn.Linear(64 * 2 + 32 + hidden_size, 256),
             nn.ReLU(),
@@ -149,98 +156,155 @@ class NERRelationModel(nn.Module):
 
         rel_probs = defaultdict(list)
 
-        if rel_data and self.training:
+        if rel_data:
             for batch_idx, sample in enumerate(rel_data):
-                if sample['pairs'].numel() == 0:
-                    print(f"Пропуск примера {batch_idx}: нет пар отношений")
+                entities, id_map, x = self._encode_entities(sequence_output, batch_idx, sample, device)
+                if x is None or len(id_map) < 2:
                     continue
 
-                entities = [e for e in sample['entities'] if 'start' in e and 'end' in e]
-                if len(entities) < 2:
-                    print(f"Пропуск примера {batch_idx}: недостаточно сущностей ({len(valid_entities)})")
-                    continue
+                x = self._compute_gat(x, device)
 
-                # Entity embeddings: attention pooling + type embedding
-                entity_embeds, entity_types = [], []
-                for e in entities:
-                    start = e['start']
-                    end = e['end']
-                    token_embeds = sequence_output[batch_idx, start:end + 1]
-                    attention_scores = token_embeds @ token_embeds.mean(dim=0)
-                    attention_weights = torch.softmax(attention_scores, dim=0)
-                    pooled = torch.sum(token_embeds * attention_weights.unsqueeze(-1), dim=0)
-
-                    type_idx = self.entity_types.index(e['type'])
-                    type_emb = self.entity_type_emb(torch.tensor(type_idx, device=device))
-                    final_embed = pooled + type_emb
-                    entity_embeds.append(final_embed)
-                    entity_types.append(type_idx)
-
-                x = torch.stack(entity_embeds)
-                edge_pairs = [[i, j] for i in range(len(x)) for j in range(len(x)) if i != j]
-                edge_index = torch.tensor(edge_pairs).t().to(device)
-
-                # GAT
-                x = self.gat1(x, edge_index)
-                x = self.norm1(x)
-                x = F.elu(x)
-                x = self.gat2(x, edge_index)
-                x = self.norm2(x)
-                x = F.elu(x)
-
-                # Entity ID map
-                id_map = {e['id']: i for i, e in enumerate(entities)}
-
-                # Collect relation training data
+                # ======= Положительные пары =======
+                pos_indices_by_type = defaultdict(list)
                 for (i1, i2), label in zip(sample['pairs'], sample['labels']):
                     if i1 not in id_map or i2 not in id_map:
                         continue
-
-                    rel_type_idx = label
-                    rel_type_tensor = self.rel_type_emb(torch.tensor(rel_type_idx, device=device))
-
                     idx1, idx2 = id_map[i1], id_map[i2]
-                    if self.relation_types[rel_type_idx] == 'FOUNDED_BY':
-                        idx1, idx2 = idx2, idx1  # flip
-
+                    if self.relation_types[label] == 'FOUNDED_BY':
+                        idx1, idx2 = idx2, idx1
+                    rel_type_tensor = self.rel_type_emb(torch.tensor(label, device=device))
                     pair_vec = torch.cat([x[idx1], x[idx2], rel_type_tensor, cls_token[batch_idx]])
                     score = self.rel_classifier(pair_vec)
-                    rel_probs[rel_type_idx].append((score, 1.0))
+                    rel_probs[label].append((score, 1.0))
+                    pos_indices_by_type[label].append((idx1, idx2))
 
-                # Generate negative samples
-                for rel_type_idx, rel_type in enumerate(self.relation_types):
-                    pos_indices = {(id_map[i1], id_map[i2]) for (i1, i2), l in zip(sample['pairs'], sample['labels'])
-                                   if l == rel_type_idx and i1 in id_map and i2 in id_map}
+                # ======= Отрицательные пары (только в train) =======
+                if self.training:
+                    for rel_type_idx, rel_type in enumerate(self.relation_types):
+                        negatives = self._get_negatives(x, entities, rel_type_idx, rel_type, pos_indices_by_type,
+                                                        device)
+                        for i, j in negatives:
+                            rel_type_tensor = self.rel_type_emb(torch.tensor(rel_type_idx, device=device))
+                            pair_vec = torch.cat([x[i], x[j], rel_type_tensor, cls_token[batch_idx]])
+                            score = self.rel_classifier(pair_vec)
+                            rel_probs[rel_type_idx].append((score, 0.0))
 
-                    all_pairs = [(i, j) for i in range(len(x)) for j in range(len(x))
-                                 if i != j and (i, j) not in pos_indices]
-                    sampled = random.sample(all_pairs, min(5 * len(pos_indices), len(all_pairs)))
+            # ======= Loss по отношениям (train only) =======
+            if self.training:
+                for rel_type_idx, pairs in rel_probs.items():
+                    if not pairs:
+                        continue
+                    logits, labels = zip(*pairs)
+                    logits = torch.cat(logits).view(-1)
+                    labels = torch.tensor(labels, device=device, dtype=torch.float)
+                    pos_weight = torch.tensor(
+                        [3.0 if self.relation_types[rel_type_idx] in ['SPOUSE', 'SIBLING'] else 1.0],
+                        device=device)
+                    rel_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(logits, labels)
+                    loss += rel_loss
 
-                    for i, j in sampled:
-                        rel_type_tensor = self.rel_type_emb(torch.tensor(rel_type_idx, device=device))
-                        pair_vec = torch.cat([x[i], x[j], rel_type_tensor, cls_token[batch_idx]])
-                        score = self.rel_classifier(pair_vec)
-                        rel_probs[rel_type_idx].append((score, 0.0))
+        return {
+            'ner_logits': ner_logits,
+            'rel_probs': rel_probs,
+            'loss': loss if loss != 0 else None
+        }
 
-                pos_pairs = sum(len([l for l in item['labels'] if l > 0]) for item in rel_data)
-                print(f"Batch stats - Entities: {sum(len(x['entities']) for x in rel_data)}, "
-                      f"Pairs: {sum(len(x['pairs']) for x in rel_data)}, "
-                      f"Pos: {sum(len([l for l in x['labels'] if l > 0]) for x in rel_data)}")
-            # Compute relation loss
-            for rel_type_idx, pairs in rel_probs.items():
-                if not pairs:
+    def _encode_entities(self, sequence_output, batch_idx, sample, device):
+        entities = [e for e in sample['entities'] if 'start' in e and 'end' in e]
+        if len(entities) < 2:
+            if self.training:
+                print(f"Пропуск примера {batch_idx}: недостаточно сущностей ({len(entities)})")
+            return None, None, None
+
+        entity_embeds, id_map = [], {}
+        for i, e in enumerate(entities):
+            start, end = e['start'], e['end']
+            token_embeds = sequence_output[batch_idx, start:end + 1]
+            attention_scores = token_embeds @ token_embeds.mean(dim=0)
+            attention_weights = torch.softmax(attention_scores, dim=0)
+            pooled = torch.sum(token_embeds * attention_weights.unsqueeze(-1), dim=0)
+
+            try:
+                type_idx = self.entity_types.index(e['type'])
+            except ValueError:
+                if self.training:
+                    print(f"Неизвестный тип сущности: {e['type']}")
+                continue
+
+            type_emb = self.entity_type_emb(torch.tensor(type_idx, device=device))
+            entity_embeds.append(pooled + type_emb)
+            id_map[e['id']] = len(entity_embeds) - 1
+
+        if len(entity_embeds) < 2:
+            return None, None, None
+
+        x = torch.stack(entity_embeds)
+        return entities, id_map, x
+
+    def _compute_gat(self, x, device):
+        edge_pairs = [[i, j] for i in range(len(x)) for j in range(len(x)) if i != j]
+        edge_index = torch.tensor(edge_pairs).t().to(device)
+
+        x = self.gat1(x, edge_index)
+        x = self.norm1(x)
+        x = F.elu(x)
+        x = self.gat2(x, edge_index)
+        x = self.norm2(x)
+        x = F.elu(x)
+        return x
+
+    def _get_negatives(self, x, entities, rel_type_idx, rel_type, pos_indices_by_type, device):
+        pos_set = set(pos_indices_by_type[rel_type_idx])
+        if len(x) < 2:
+            return []
+
+        # Составим матрицу совместимых типов
+        valid_combinations = VALID_COMB.get(rel_type, [])
+        valid_pairs_mask = torch.zeros((len(x), len(x)), dtype=torch.bool, device=device)
+
+        entity_types = [e['type'] for e in entities]
+        for i in range(len(x)):
+            for j in range(len(x)):
+                if i == j or (i, j) in pos_set:
                     continue
-                logits, labels = zip(*pairs)
-                logits = torch.cat(logits).view(-1)
-                labels = torch.tensor(labels, device=device, dtype=torch.float)
+                if (entity_types[i], entity_types[j]) in valid_combinations:
+                    valid_pairs_mask[i, j] = True
 
-                pos_weight = torch.tensor(
-                    [3.0 if self.relation_types[rel_type_idx] in ['SPOUSE', 'SIBLING'] else 1.0],
-                    device=device)
-                rel_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(logits, labels)
-                loss += rel_loss
+        valid_indices = valid_pairs_mask.nonzero(as_tuple=False)
+        if valid_indices.size(0) == 0:
+            return []
 
-        return {'ner_logits': ner_logits, 'rel_probs': rel_probs, 'loss': loss if loss != 0 else None}
+        # Построим отрицательные пары
+        i_indices = valid_indices[:, 0]
+        j_indices = valid_indices[:, 1]
+        neg_pairs = torch.stack([i_indices, j_indices], dim=1)
+
+        # Если нет позитивов — возвращаем случайную подвыборку
+        if not pos_set:
+            sampled_ids = torch.randperm(len(neg_pairs))[:min(30, len(neg_pairs))]
+            return [tuple(pair.cpu().tolist()) for pair in neg_pairs[sampled_ids]]
+
+        # Расчёт эмбеддингов для позитивных пар
+        pos_embeds = torch.stack([torch.cat([x[i], x[j]]) for i, j in pos_set])
+        pos_mean = pos_embeds.mean(dim=0)
+
+        # Расчёт эмбеддингов для всех кандидатов (батчево)
+        x_i = x[i_indices]  # [N, H]
+        x_j = x[j_indices]  # [N, H]
+        pair_embeds = torch.cat([x_i, x_j], dim=1)  # [N, 2H]
+
+        # Cosine similarity
+        pos_mean_norm = F.normalize(pos_mean.unsqueeze(0), dim=1)  # [1, 2H]
+        pair_embeds_norm = F.normalize(pair_embeds, dim=1)  # [N, 2H]
+        similarities = torch.matmul(pair_embeds_norm, pos_mean_norm.T).squeeze(1)  # [N]
+
+        # Top-K наиболее похожих отрицательных примеров
+        k = min(3 * len(pos_set), len(similarities))
+        topk_indices = torch.topk(similarities, k).indices
+
+        selected_pairs = neg_pairs[topk_indices]
+        return [tuple(pair.cpu().tolist()) for pair in selected_pairs]
+
 
     def save_pretrained(self, save_dir, tokenizer=None):
         """Сохраняет модель, конфигурацию и токенизатор в указанную директорию."""
@@ -589,6 +653,9 @@ def train_model():
                 ner_labels=ner_labels,
                 rel_data=batch['rel_data'] 
             )
+
+            print(f"[DEBUG] outputs keys: {outputs.keys()}")
+
             if outputs['loss'] is None:
                 print(f"[WARN] Skipping batch due to missing loss")
                 continue
@@ -814,31 +881,29 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
         
         # Predict all possible relations
         for rel_type in RELATION_TYPES:
+            valid_combinations = VALID_COMB.get(rel_type, [])
             for i, e1 in enumerate(entities):
                 for j, e2 in enumerate(entities):
-                    if i != j:
-                        if rel_type not in ['SPOUSE', 'SIBLING', 'RELATIVE']:
-                            if (e1['type'], e2['type']) not in VALID_COMB.get(rel_type, []):
-                                continue
-                        # For FOUNDED_BY we need to reverse the direction
-                        if rel_type == 'FOUNDED_BY':
-                            src, tgt = j, i
-                        else:
-                            src, tgt = i, j
+                    if i != j and (e1['type'], e2['type']) in valid_combinations:
+                            # For FOUNDED_BY we need to reverse the direction
+                            if rel_type == 'FOUNDED_BY':
+                                src, tgt = j, i
+                            else:
+                                src, tgt = i, j
                             
-                        pair_features = torch.cat([x[src], x[tgt]])
-                        logit = model.rel_classifiers[rel_type](pair_features)
-                        prob = torch.sigmoid(logit).item()
+                            pair_features = torch.cat([x[src], x[tgt]])
+                            logit = model.rel_classifiers[rel_type](pair_features)
+                            prob = torch.sigmoid(logit).item()
                         
-                        if prob > relation_threshold[rel_type]:
-                            relations.append({
-                                'type': rel_type,
-                                'arg1_id': entities[src]['id'],
-                                'arg2_id': entities[tgt]['id'],
-                                'arg1': entities[src],
-                                'arg2': entities[tgt],
-                                'confidence': prob
-                            })
+                            if prob > relation_threshold[rel_type]:
+                                relations.append({
+                                    'type': rel_type,
+                                    'arg1_id': entities[src]['id'],
+                                    'arg2_id': entities[tgt]['id'],
+                                    'arg1': entities[src],
+                                    'arg2': entities[tgt],
+                                    'confidence': prob
+                                })
     
     # Remove duplicates and keep highest confidence
     unique_relations = {}
