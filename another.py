@@ -314,82 +314,87 @@ class NERRelationModel(nn.Module):
         selected_pairs = neg_pairs[topk_indices]
         return [tuple(pair.cpu().tolist()) for pair in selected_pairs]
 
-
     def save_pretrained(self, save_dir, tokenizer=None):
-        """Сохраняет модель, конфигурацию и токенизатор в указанную директорию."""
         os.makedirs(save_dir, exist_ok=True)
-        
+
         # 1. Сохраняем веса модели
         model_path = os.path.join(save_dir, "pytorch_model.bin")
         torch.save(self.state_dict(), model_path)
-        
+
         # 2. Сохраняем конфигурацию модели
         config = {
             "model_type": "bert-ner-rel",
             "model_name": getattr(self.bert, "name_or_path", "custom"),
             "num_ner_labels": self.num_ner_labels,
-            "num_rel_labels": len(RELATION_TYPES),  # Добавляем
-            "bert_config": self.bert.config.to_diff_dict(),  # Более безопасный метод
-            "model_config": {  # Добавляем специфичные для модели параметры
+            "num_rel_labels": self.num_rel_labels,
+            "entity_types": self.entity_types,  # ← добавлено
+            "relation_types": self.relation_types,  # ← добавлено
+            "bert_config": self.bert.config.to_diff_dict(),
+            "model_config": {
                 "gat_hidden_size": 64,
                 "gat_heads": 4
             }
         }
-        
+
         config_path = os.path.join(save_dir, "config.json")
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
-        
+
         # 3. Сохраняем токенизатор
         if tokenizer is not None:
             tokenizer.save_pretrained(save_dir)
         
     @classmethod
     def from_pretrained(cls, model_dir, device="cuda"):
-        """Загружает модель из указанной директории."""
         try:
             device = torch.device(device)
-            
+
             # 1. Загружаем конфигурацию
             config_path = os.path.join(model_dir, "config.json")
             if not os.path.exists(config_path):
                 raise FileNotFoundError(f"Config file not found at {config_path}")
-                
+
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
-            
+
+            # Проверки
+            if "entity_types" not in config or "relation_types" not in config:
+                raise ValueError("Missing 'entity_types' or 'relation_types' in config")
+
+            entity_types = config["entity_types"]
+            relation_types = config["relation_types"]
+
             # 2. Инициализируем BERT
-            if "bert_config" not in config:
-                raise ValueError("Invalid config: missing bert_config")
-                
             bert_config = BertConfig.from_dict(config["bert_config"])
             bert = AutoModel.from_pretrained(
                 model_dir,
                 config=bert_config,
                 ignore_mismatched_sizes=True
             )
-            
+
             # 3. Создаем экземпляр модели
             model = cls(
                 model_name=config.get("model_name", "DeepPavlov/rubert-base-cased"),
-                num_ner_labels=config.get("num_ner_labels", len(ENTITY_TYPES)*2+1),
-                num_rel_labels=config.get("num_rel_labels", len(RELATION_TYPES))
+                num_ner_labels=config.get("num_ner_labels", len(entity_types) * 2 + 1),
+                num_rel_labels=config.get("num_rel_labels", len(relation_types)),
+                entity_types=entity_types,
+                relation_types=relation_types
             ).to(device)
-            
+
             # 4. Загружаем веса
             model_path = os.path.join(model_dir, "pytorch_model.bin")
             if not os.path.exists(model_path):
                 raise FileNotFoundError(f"Model weights not found at {model_path}")
-                
+
             state_dict = torch.load(model_path, map_location=device)
             model.load_state_dict(state_dict)
-            
-            # 5. Загружаем BERT
+
+            # 5. Устанавливаем BERT
             model.bert = bert.to(device)
-            
+
             model.eval()
             return model
-            
+
         except Exception as e:
             raise RuntimeError(f"Error loading model from {model_dir}: {str(e)}")
 
