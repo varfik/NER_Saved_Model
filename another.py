@@ -230,8 +230,6 @@ class NERRelationModel(nn.Module):
             try:
                 type_idx = self.entity_type_to_idx.get(e['type'], -1)
             except ValueError:
-                if self.training:
-                    print(f"Неизвестный тип сущности: {e['type']}")
                 continue
 
             type_emb = self.entity_type_emb(torch.tensor(type_idx, device=device))
@@ -528,7 +526,7 @@ class NERELDataset(Dataset):
                 if start <= entity['end'] and end >= entity['start']:
                     matched_tokens.append(i)
             if not matched_tokens:
-                recovered = find_best_span(entity['text'], text, entity['start'])
+                recovered = self.find_best_span(entity['text'], text, entity['start'])
                 if recovered:
                     entity['start'], entity['end'] = recovered
                     for i, (start, end) in enumerate(offset_mapping):
