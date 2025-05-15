@@ -16,6 +16,7 @@ from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
+import re
 from termcolor import colored
 
 # Цвета для визуализации разных типов сущностей
