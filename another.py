@@ -158,6 +158,7 @@ class NERRelationModel(nn.Module):
             loss += ner_loss
 
         rel_probs = defaultdict(list)
+        rel_logits = []  # New: Store raw logits for metrics calculation
 
         if rel_data:
             for batch_idx, sample in enumerate(rel_data):
@@ -179,6 +180,7 @@ class NERRelationModel(nn.Module):
                     pair_vec = torch.cat([x[idx1], x[idx2], rel_type_tensor, cls_token[batch_idx]])
                     score = self.rel_classifier(pair_vec)
                     rel_probs[label].append((score, 1.0))
+                    rel_logits.append((score, 1.0, label))  # New: Store for metrics
                     pos_indices_by_type[label].append((idx1, idx2))
 
                 # ======= Отрицательные пары (только в train) =======
@@ -191,6 +193,7 @@ class NERRelationModel(nn.Module):
                             pair_vec = torch.cat([x[i], x[j], rel_type_tensor, cls_token[batch_idx]])
                             score = self.rel_classifier(pair_vec)
                             rel_probs[rel_type_idx].append((score, 0.0))
+                            rel_logits.append((score, 0.0, rel_type_idx))  # New: Store for metrics
 
             # ======= Loss по отношениям (train only) =======
             if self.training:
@@ -205,10 +208,15 @@ class NERRelationModel(nn.Module):
                         device=device)
                     rel_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)(logits, labels)
                     loss += rel_loss
+        # Prepare outputs for metrics calculation
+        rel_logits_for_metrics = defaultdict(list)
+        for score, label, rel_type in rel_logits:
+            rel_logits_for_metrics[rel_type].append((score, label))
 
         return {
             'ner_logits': ner_logits,
             'rel_probs': rel_probs,
+            'rel_logits': rel_logits_for_metrics,  # New: Format expected by metrics
             'loss': loss if loss != 0 else None
         }
 
@@ -735,22 +743,15 @@ def train_model():
                     ner_correct += (pred == true).sum().item()
                     ner_total += seq_len
 
-            # NEW: Relation metrics calculation
-            if 'rel_logits' in outputs:
-                rel_logits = outputs['rel_logits']  # shape: (B, N_pairs, num_rel_types)
-                for i, rel_sample in enumerate(batch['rel_data']):
-                    if 'labels' in rel_sample and len(rel_sample['labels']) > 0:
-                        # Get predictions for valid pairs
-                        valid_pairs = min(rel_logits[i].shape[0], len(rel_sample['labels']))
-                        if valid_pairs == 0:
-                            continue
-
-                        logits = rel_logits[i][:valid_pairs]  # shape: (valid_pairs, num_rel_types)
-                        preds = logits.argmax(dim=1)  # predicted class per pair
-                        targets = torch.tensor(rel_sample['labels'][:valid_pairs], device=device)
-
-                        rel_correct += (preds == targets).sum().item()
-                        rel_total += valid_pairs
+            # Relation metrics calculation
+            if 'rel_logits' in outputs and outputs['rel_logits']:
+                for rel_type, pairs in outputs['rel_logits'].items():
+                    if pairs:
+                        logits, labels = zip(*pairs)
+                        preds = torch.sigmoid(torch.cat(logits)) > 0.5
+                        labels = torch.tensor(labels, device=device)
+                        rel_correct += (preds == labels).sum().item()
+                        rel_total += len(labels)
 
         # Evaluation metrics
         ner_acc = ner_correct / ner_total if ner_total > 0 else 0
