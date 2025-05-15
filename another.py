@@ -16,7 +16,7 @@ from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
-import regex
+import re
 import unicodedata
 from termcolor import colored
 
@@ -418,15 +418,13 @@ class NERELDataset(Dataset):
 
     def _find_best_span(self, entity_text, text, approx_start):
         # Ищем все вхождения entity_text в тексте
-        matches = [
-            (m.start(), m.end())
-            for m in regex.finditer(regex.escape(entity_text), text, overlapped=True)
+        candidates = [
+            (m.start(), m.end()) for m in re.finditer(re.escape(entity_text), full_text)
         ]
-        if not matches:
+        if not candidates:
             return None
-
-        # Из всех совпадений выбираем ближайшее к приблизительному `start`
-        return min(matches, key=lambda span: abs(span[0] - approx_start))
+        # Выбираем ближайшее к предполагаемой позиции
+        return min(candidates, key=lambda span: abs(span[0] - orig_start))
     
     def _parse_ann_file(self, ann_path, text):
         entities, relations = [], []
@@ -525,11 +523,19 @@ class NERELDataset(Dataset):
         # Align entities with tokenization
         for entity in sample['entities']:
             matched_tokens = []
+
             for i, (start, end) in enumerate(offset_mapping):
                 if start == end:
                     continue  # спецтокены
                 if start <= entity['end'] and end >= entity['start']:
                     matched_tokens.append(i)
+            if not matched_tokens:
+                recovered = find_best_span(entity['text'], text, entity['start'])
+                if recovered:
+                    entity['start'], entity['end'] = recovered
+                    for i, (start, end) in enumerate(offset_mapping):
+                        if start <= entity['end'] and end >= entity['start']:
+                            matched_tokens.append(i)
             if not matched_tokens:
                 print(f"[WARN] Entity alignment failed: Entity: '{entity['text']}' ({entity['type']}), "
                       f"Span: {entity['start']}-{entity['end']}, "
