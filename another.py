@@ -422,41 +422,30 @@ class NERELDataset(Dataset):
         return samples
 
     def _find_best_span(self, entity_text, text, orig_start):
-        import unicodedata
         entity_text = unicodedata.normalize("NFC", entity_text.replace('\u00A0', ' '))
         text = unicodedata.normalize("NFC", text.replace('\u00A0', ' '))
 
-        # 1. Попробуй точное совпадение
-        candidates = [
-            (m.start(), m.end()) for m in re.finditer(re.escape(entity_text), text)
-        ]
+        # 1. Точное совпадение
+        exact_matches = [m.span() for m in re.finditer(re.escape(entity_text), text)]
+        if exact_matches:
+            return min(exact_matches, key=lambda span: abs(span[0] - orig_start))
 
-        # 2. Если не нашёл — пробуем первые и последние слова
-        if not candidates and len(entity_text.split()) > 1:
-            first_word = entity_text.split()[0]
-            last_word = entity_text.split()[-1]
+        # 2. Поиск по подстроке (если entity_text состоит из нескольких слов)
+        words = entity_text.split()
+        if len(words) > 1:
+            for i in range(len(words)):
+                # Ищем начало по первому слову
+                first_word = words[i]
+                for m in re.finditer(re.escape(first_word), text):
+                    start = m.start()
+                    end = start + len(entity_text)
+                    candidate = text[start:end]
+                    if candidate == entity_text:
+                        return (start, end)
 
-            fallback_candidates = []
-            for word in [first_word, last_word]:
-                for m in re.finditer(re.escape(word), text):
-                    start, end = m.start(), m.end()
-                    context_window = text[start:start + len(entity_text) + 10]
-                    if entity_text in context_window:
-                        idx = context_window.find(entity_text)
-                        fallback_start = start + idx
-                        fallback_end = fallback_start + len(entity_text)
-                        fallback_candidates.append((fallback_start, fallback_end))
-
-            candidates = fallback_candidates
-
-        if not candidates:
-            print(f"[WARN] Entity span not found: '{entity_text}' around position {orig_start}")
-            print(f"Snippet: {text[orig_start - 50:orig_start + 50]}")
-            return None
-
-        # 3. Верни ближайший к orig_start
-        return min(candidates, key=lambda span: abs(span[0] - orig_start))
-
+        # 3. Fallback: возвращаем оригинальный span, даже если текст не совпадает
+        print(f"[WARN] Using original span for '{entity_text}' despite mismatch")
+        return (orig_start, orig_start + len(entity_text))
     def _parse_ann_file(self, ann_path, text):
         entities, relations = [], []
         entity_map = {}
@@ -803,9 +792,11 @@ def visualize_prediction_colored(prediction):
 
 def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
     # Tokenize input with offset mapping
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    encoding = tokenizer(text, return_tensors="pt", truncation=True, padding=True).to(device)
     relation_threshold = {**RELATION_THRESHOLDS, **(relation_threshold or {})}
-    encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, max_length=512,
-        truncation=True)
+    # encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, max_length=512,
+    #     truncation=True)
     
     input_ids = encoding['input_ids'].to(device)
     attention_mask = encoding['attention_mask'].to(device)
@@ -974,24 +965,24 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
     }
 
 if __name__ == "__main__":
-    model, tokenizer = train_model()
-
-    test_texts = [
-        "Эмир Катара встретится с членами королевской семьи.Эмир Катара шейх Хамад бен Халиф Аль Тани встретится в понедельник с членами королевской семьи и высокопоставленными чиновниками страны на фоне слухов о том, что он намерен передать власть сыну — наследному принцу шейху Тамиму, передает агентство Рейтер со ссылкой на катарский телеканал 'Аль-Джазира'. 'Аль-Джазира', в свою очередь, ссылается на 'надежный источник в Катаре', но не приводит каких-либо деталей. Ранее в этом месяце в дипломатических кругах появились слухи, что эмир Катара, которому сейчас 61 год, рассматривает возможность передачи власти 33-летнему наследному принцу, отмечает агентство. При этом также предполагается, что в отставку подаст влиятельный премьер-министр и министр иностранных дел Катара шейх Хамад бен Джасем Аль Тани. По данным агентства, дипломаты западных и арабских стран оценивают такое решение как попытку осторожной передачи власти более молодому поколению правителей. Ранее новостной портал 'Элаф' отмечал, что перемены во властных структурах Катара могут произойти уже в конце июня. Согласно информации агентства Франс Пресс, Тамим бен Хамад Аль Тани родился в 1980 году и является вторым сыном эмира и его второй жены Мозы бинт Нассер. Наследный принц занимает офицерский пост в катарской армии, а также является главой Олимпийского комитета страны.",
-        "Айрат Мурзагалиев, заместитель начальника управления президента РФ, встретился с главой администрации Уфы.",
-        "Иван Петров работает программистом в компании Яндекс.",
-        "Доктор Сидоров принял пациентку Ковалеву в городской больнице.",
-        "Директор сводного экономического департамента Банка России Надежда Иванова назначена также на должность заместителя председателя ЦБ, сообщил в четверг регулятор.",
-        "Дмитрий работает в организации 'ЭкоФарм'",
-        "Компания 'Технологии будущего' является частью крупной корпорации, расположенной в Санкт-Петербурге",
-        "Анна занимает должность главного врача в больнице 'Здоровье'."
-    ]
-    
-    for text in test_texts:
-        print("\n" + "="*80)
-        print(f"Processing text: '{text}'")
-        result = predict(text, model, tokenizer)
-        print(visualize_prediction_colored(result))
+    # model, tokenizer = train_model()
+    #
+    # test_texts = [
+    #     "Эмир Катара встретится с членами королевской семьи.Эмир Катара шейх Хамад бен Халиф Аль Тани встретится в понедельник с членами королевской семьи и высокопоставленными чиновниками страны на фоне слухов о том, что он намерен передать власть сыну — наследному принцу шейху Тамиму, передает агентство Рейтер со ссылкой на катарский телеканал 'Аль-Джазира'. 'Аль-Джазира', в свою очередь, ссылается на 'надежный источник в Катаре', но не приводит каких-либо деталей. Ранее в этом месяце в дипломатических кругах появились слухи, что эмир Катара, которому сейчас 61 год, рассматривает возможность передачи власти 33-летнему наследному принцу, отмечает агентство. При этом также предполагается, что в отставку подаст влиятельный премьер-министр и министр иностранных дел Катара шейх Хамад бен Джасем Аль Тани. По данным агентства, дипломаты западных и арабских стран оценивают такое решение как попытку осторожной передачи власти более молодому поколению правителей. Ранее новостной портал 'Элаф' отмечал, что перемены во властных структурах Катара могут произойти уже в конце июня. Согласно информации агентства Франс Пресс, Тамим бен Хамад Аль Тани родился в 1980 году и является вторым сыном эмира и его второй жены Мозы бинт Нассер. Наследный принц занимает офицерский пост в катарской армии, а также является главой Олимпийского комитета страны.",
+    #     "Айрат Мурзагалиев, заместитель начальника управления президента РФ, встретился с главой администрации Уфы.",
+    #     "Иван Петров работает программистом в компании Яндекс.",
+    #     "Доктор Сидоров принял пациентку Ковалеву в городской больнице.",
+    #     "Директор сводного экономического департамента Банка России Надежда Иванова назначена также на должность заместителя председателя ЦБ, сообщил в четверг регулятор.",
+    #     "Дмитрий работает в организации 'ЭкоФарм'",
+    #     "Компания 'Технологии будущего' является частью крупной корпорации, расположенной в Санкт-Петербурге",
+    #     "Анна занимает должность главного врача в больнице 'Здоровье'."
+    # ]
+    #
+    # for text in test_texts:
+    #     print("\n" + "="*80)
+    #     print(f"Processing text: '{text}'")
+    #     result = predict(text, model, tokenizer)
+    #     print(visualize_prediction_colored(result))
 
         # print("\nEntities:")
         # for e in result['entities']:
@@ -1006,11 +997,12 @@ if __name__ == "__main__":
     
     # Использование модели
     result = predict("По улице шел красивый человек, его имя было Мефодий. И был он счастлив. Работал этот чувак в яндексе, разработчиком. Или директором. Он пока не определился!", loaded_model, loaded_tokenizer)
-    print("Сущности:")
-    for e in result['entities']:
-        print(f"{e['type']}: {e['text']} (позиция: {e['start_char']}-{e['end_char']})")
-
-    print("\nОтношения:")
-    for r in result['relations']:
-        print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (confidence: {r['confidence']:.2f})")
+    print(visualize_prediction_colored(result))
+    # print("Сущности:")
+    # for e in result['entities']:
+    #     print(f"{e['type']}: {e['text']} (позиция: {e['start_char']}-{e['end_char']})")
+    #
+    # print("\nОтношения:")
+    # for r in result['relations']:
+    #     print(f"{r['type']}: {r['arg1']['text']} -> {r['arg2']['text']} (confidence: {r['confidence']:.2f})")
 
