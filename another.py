@@ -223,10 +223,9 @@ class NERRelationModel(nn.Module):
                         rel_probs[rel_type_idx].append((score, 0.0))
 
                 pos_pairs = sum(len([l for l in item['labels'] if l > 0]) for item in rel_data)
-                print(f"Batch stats - Entities: {sum(len(x['entities']) for x in batch['rel_data'])}, "
-                      f"Positive pairs: {pos_pairs}, "
-                      f"Negative pairs: {sum(len(x['labels']) for x in batch['rel_data'])} - {pos_pairs}")
-
+                print(f"Batch stats - Entities: {sum(len(x['entities']) for x in rel_data)}, "
+                      f"Pairs: {sum(len(x['pairs']) for x in rel_data)}, "
+                      f"Pos: {sum(len([l for l in x['labels'] if l > 0]) for x in rel_data)}")
             # Compute relation loss
             for rel_type_idx, pairs in rel_probs.items():
                 if not pairs:
