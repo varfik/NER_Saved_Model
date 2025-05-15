@@ -416,16 +416,14 @@ class NERELDataset(Dataset):
         return samples
 
 
-    def _find_best_span(self, entity_text, text, approx_start):
-        # Ищем все вхождения entity_text в тексте
+    def _find_best_span(self, entity_text, text, orig_start):
         candidates = [
-            (m.start(), m.end()) for m in re.finditer(re.escape(entity_text), full_text)
+            (m.start(), m.end()) for m in re.finditer(re.escape(entity_text), text)
         ]
         if not candidates:
             return None
-        # Выбираем ближайшее к предполагаемой позиции
         return min(candidates, key=lambda span: abs(span[0] - orig_start))
-    
+
     def _parse_ann_file(self, ann_path, text):
         entities, relations = [], []
         entity_map = {}
