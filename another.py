@@ -401,11 +401,12 @@ class NERRelationModel(nn.Module):
 
 SYMMETRIC_RELATIONS = {'SIBLING', 'SPOUSE', 'RELATIVE'}
 class NERELDataset(Dataset):
-    def __init__(self, data_dir, tokenizer, max_length=512, include_offsets=False):
+    def __init__(self, data_dir, tokenizer, max_length=512, include_offsets=False, neg_to_pos_ratio=1.0):
         self.data_dir = data_dir
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.include_offsets = include_offsets
+        self.neg_to_pos_ratio = neg_to_pos_ratio
         self.samples = self._load_samples()
         
     def _load_samples(self):
@@ -586,7 +587,7 @@ class NERELDataset(Dataset):
         }
         
         token_entity_id_to_idx = {e['id']: i for i, e in enumerate(token_entities)}
-        used_pairs = set()
+        pos_pairs = set()
 
         # Положительные примеры
         for relation in sample['relations']:
@@ -602,7 +603,12 @@ class NERELDataset(Dataset):
             if pair not in used_pairs:
                 rel_data['pairs'].append(pair)
                 rel_data['labels'].append(RELATION_TYPES[relation['type']])
-                used_pairs.add(pair)
+                pos_pairs.add(pair)
+
+        # Ограниченное количество негативных примеров
+        num_pos = len(pos_pairs)
+        max_neg = int(num_pos * self.neg_to_pos_ratio)
+        all_possible = set()
 
         # Отрицательные примеры
         num_entities = len(token_entities)
@@ -611,11 +617,13 @@ class NERELDataset(Dataset):
                 if i == j:
                     continue
                 pair = (min(i, j), max(i, j))
-                if (i, j) in used_pairs:
-                    continue
-                rel_data['pairs'].append(pair)
-                rel_data['labels'].append(0)  # 0 — нет отношения
-                used_pairs.add(pair)
+                if (i, j) not in pos_pairs:
+                    all_possible.add(pair)
+
+        sampled_negatives = random.sample(list(all_possible), min(len(all_possible), max_neg))
+        for pair in sampled_negatives:
+            rel_data['pairs'].append(pair)
+            rel_data['labels'].append(0)
 
         output = {
             'input_ids': encoding['input_ids'].squeeze(0),
@@ -667,7 +675,7 @@ def train_model():
     model = NERRelationModel(relation_types=relation_types, entity_types=entity_types).to(device)
 
     # Загрузка данных
-    train_dataset = NERELDataset("NEREL/NEREL-v1.1/train", tokenizer)
+    train_dataset = NERELDataset("NEREL/NEREL-v1.1/train", tokenizer, neg_to_pos_ratio=1.0)
 
     # Create weighted sampler to balance relation examples
     sample_weights = []
