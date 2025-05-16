@@ -19,6 +19,14 @@ import numpy as np
 import re
 import unicodedata
 from termcolor import colored
+import logging
+
+# Настройка логгера
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,  # Можно сменить на DEBUG для подробностей
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # Цвета для визуализации разных типов сущностей
 ENTITY_COLORS = {
@@ -450,7 +458,7 @@ class NERELDataset(Dataset):
                         return (start, end)
 
         # 3. Fallback: возвращаем оригинальный span, даже если текст не совпадает
-        print(f"[WARN] Using original span for '{entity_text}' despite mismatch")
+        logger.warning(f"Using original span for '{entity_text}' despite mismatch")
         return (orig_start, orig_start + len(entity_text))
     def _parse_ann_file(self, ann_path, text):
         entities, relations = [], []
@@ -483,18 +491,17 @@ class NERELDataset(Dataset):
 
                     extracted_text = text[start:end]
                     if extracted_text != entity_text:
-                        print(f"[DEBUG] Misalignment detected:")
-                        print(f"  entity_id: {entity_id}")
-                        print(f"  expected: '{entity_text}'")
-                        print(f"  found:    '{extracted_text}'")
-                        print(f"  raw span: '{text[start:end]}'")
-                        print(f"  context:  '{text[start - 20:end + 20].replace('\\n', '⏎')}'")
+                        logger.debug(f"Misalignment detected:\n"
+                                     f"  entity_id: {entity_id}\n"
+                                     f"  expected: '{entity_text}'\n"
+                                     f"  found:    '{extracted_text}'\n"
+                                     f"  context:  '{text[start - 20:end + 20].replace(chr(10), '⏎')}'")
                         best_span = self._find_best_span(entity_text, text, start)
                         if best_span:
                             start, end = best_span
                         else:
-                            print(f"[WARN] Entity alignment failed: Entity: '{entity_text}' ({entity_type}), "
-                                  f"Span: {start}-{end}, Text: '{text[start - 10:end + 10]}'")
+                            logger.warning(f"Entity alignment failed: Entity: '{entity_text}' ({entity_type}), "
+                                           f"Span: {start}-{end}, Text: '{text[start - 10:end + 10]}'")
                             continue
 
                     entity = {
@@ -562,9 +569,9 @@ class NERELDataset(Dataset):
                         if start < entity['end'] and end > entity['start']:
                             matched_tokens.append(i)
             if not matched_tokens:
-                print(f"[WARN] Entity alignment failed: Entity: '{entity['text']}' ({entity['type']}), "
-                      f"Span: {entity['start']}-{entity['end']}, "
-                      f"Text segment: '{text[entity['start']:entity['end']]}'")
+                logger.warning(f"Entity alignment failed: Entity: '{entity['text']}' ({entity['type']}), "
+                               f"Span: {entity['start']}-{entity['end']}, "
+                               f"Text segment: '{text[entity['start']:entity['end']]}'")
                 continue
 
             ent_type_id = ENTITY_TYPES[entity['type']]
@@ -617,7 +624,7 @@ class NERELDataset(Dataset):
                 if i == j:
                     continue
                 pair = (min(i, j), max(i, j))
-                if (i, j) not in pos_pairs:
+                if pair not in pos_pairs:
                     all_possible.add(pair)
 
         sampled_negatives = random.sample(list(all_possible), min(len(all_possible), max_neg))
