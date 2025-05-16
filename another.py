@@ -600,7 +600,7 @@ class NERELDataset(Dataset):
             if relation['type'] in SYMMETRIC_RELATIONS:
                 idx1, idx2 = sorted([idx1, idx2])
             pair = (idx1, idx2)
-            if pair not in used_pairs:
+            if pair not in pos_pairs:
                 rel_data['pairs'].append(pair)
                 rel_data['labels'].append(RELATION_TYPES[relation['type']])
                 pos_pairs.add(pair)
