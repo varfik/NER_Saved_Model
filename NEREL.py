@@ -64,12 +64,12 @@ VALID_COMB = {
     'WORKS_AS': [('PERSON', 'PROFESSION')],
     'MEMBER_OF': [('PERSON', 'ORGANIZATION'), ('PERSON', 'FAMILY'), ('PROFESSION', 'FAMILY')],
     'FOUNDED_BY': [('ORGANIZATION', 'PERSON'), ('LOCATION', 'PERSON'), ('ORGANIZATION', 'ORGANIZATION'), ('PROFESSION', 'ORGANIZATION')],
-    'SPOUSE': [('PERSON', 'PERSON'), ('PROFESSION', 'PROFESSION'), ('PROFESSION', 'PERSON')],
-    'PARENT_OF': [('PERSON', 'PERSON'), ('PROFESSION', 'PERSON')],
-    'SIBLING': [('PERSON', 'PERSON'), ('PROFESSION', 'PERSON')],
+    'SPOUSE': [('PERSON', 'PERSON'), ('PROFESSION', 'PROFESSION'), ('PROFESSION', 'PERSON'), ('PERSON', 'PROFESSION')],
+    'PARENT_OF': [('PERSON', 'PERSON'), ('PROFESSION', 'PERSON'), ('PERSON', 'PROFESSION')],
+    'SIBLING': [('PERSON', 'PERSON'), ('PROFESSION', 'PERSON'), ('PERSON', 'PROFESSION')],
     'PART_OF': [('ORGANIZATION', 'ORGANIZATION'), ('LOCATION', 'LOCATION')],
     'WORKPLACE': [('PERSON', 'ORGANIZATION'), ('PERSON', 'LOCATION'),  ('PROFESSION', 'ORGANIZATION')],
-    'RELATIVE': [('PERSON', 'PERSON'), ('PROFESSION', 'PERSON')]
+    'RELATIVE': [('PERSON', 'PERSON'), ('PROFESSION', 'PERSON'), ('PERSON', 'PROFESSION')]
 }
 
 
@@ -255,11 +255,11 @@ class NERRelationModel(nn.Module):
     # Обрабатывает одну запись в rel_data: извлекает представления сущностей,
     # формирует пары и вычисляет logits и метки
     def _process_relation_sample(self, batch_idx, sample, sequence_output, cls_token, device):
+        entities, id_map, x = self._encode_entities(sequence_output, batch_idx, sample, device)
         logger.debug(f"Sample entities: {entities}")
         logger.debug(f"ID map: {id_map}")
         logger.debug(f"Original pairs: {sample['pairs']}")
         logger.debug(f"Original labels: {sample['labels']}")
-        entities, id_map, x = self._encode_entities(sequence_output, batch_idx, sample, device)
         if x is None or len(id_map) < 2:
             return None
 
@@ -278,7 +278,7 @@ class NERRelationModel(nn.Module):
             idx1, idx2 = id_map[i1], id_map[i2]
 
             # special case for FOUNDED_BY
-            if self.relation_types[label] == 'FOUNDED_BY':
+            if RELATION_TYPES_INV[label] == 'FOUNDED_BY':
                 idx1, idx2 = idx2, idx1
 
             label_str = self.relation_types.get(label, "UNKNOWN")
