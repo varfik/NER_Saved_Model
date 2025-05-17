@@ -168,7 +168,7 @@ class NERRelationModel(nn.Module):
         x = torch.stack(entity_embeds)
         return entities, id_map, x
 
-    def _compute_gat(self, x):
+    def _compute_gat(self, x, device=None):
         edge_index = self._build_knn_graph(x, k=5)
 
         if edge_index is None or edge_index.size(1) == 0:
