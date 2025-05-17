@@ -503,9 +503,10 @@ class NERELDataset(Dataset):
                         continue
 
                     entity_text = parts[2]
+                    extracted_text = text[start:end]
 
                     # Verify entity span matches text
-                    if text[start:end] != entity_text:
+                    if extracted_text != entity_text:
                         # Try to find correct span
                         logger.debug(f"Misalignment detected:\n"
                                      f"  entity_id: {entity_id}\n"
