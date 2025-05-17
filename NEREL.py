@@ -334,7 +334,8 @@ class NERRelationModel(nn.Module):
             return []
 
         # Составим матрицу совместимых типов
-        valid_combinations = VALID_COMB.get(rel_type, [])
+        valid_combinations = VALID_COMB.get(self.relation_types[rel_type_idx], [])
+        # valid_combinations = VALID_COMB.get(rel_type, [])
         valid_pairs_mask = torch.zeros((len(x), len(x)), dtype=torch.bool, device=device)
 
         entity_types = [e['type'] for e in entities]
