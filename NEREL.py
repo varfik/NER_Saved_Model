@@ -53,9 +53,9 @@ RELATION_TYPES = {
     'SPOUSE': 4,
     'PARENT_OF': 5,
     'SIBLING': 6,
-    'PART_OF': 7,    
-    'WORKPLACE': 8,     
-    'RELATIVE': 9      
+    'PART_OF': 7,
+    'WORKPLACE': 8,
+    'RELATIVE': 9
 
 }
 
@@ -70,7 +70,7 @@ VALID_COMB = {
     'WORKPLACE': [('PERSON', 'ORGANIZATION'), ('PERSON', 'LOCATION'),  ('PROFESSION', 'ORGANIZATION')],
     'RELATIVE': [('PERSON', 'PERSON'), ('PROFESSION', 'PERSON')]
 }
-            
+
 
 RELATION_TYPES_INV = {v: k for k, v in RELATION_TYPES.items()}
 
@@ -101,16 +101,16 @@ class NERRelationModel(nn.Module):
         # Improved GAT architecture
         self.gat1 = GATConv(
             hidden_size,
-            128, 
-            heads=4, 
+            128,
+            heads=4,
             dropout=0.2,
             concat=True
         )
         self.norm1 = nn.LayerNorm(128 * 4)
         self.gat2 = GATConv(
-            128 * 4, 
-            64, 
-            heads=1, 
+            128 * 4,
+            64,
+            heads=1,
             dropout=0.3,
             concat=False
         )
@@ -487,7 +487,7 @@ class NERELDataset(Dataset):
                 if line.startswith('T'):
                     parts = line.split('\t')
                     if len(parts) < 3:
-                        continue 
+                        continue
 
                     entity_id = parts[0]
                     type_and_span = parts[1].split()
@@ -680,10 +680,16 @@ def collate_fn(batch):
 
 def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     # Инициализация модели и токенизатора
+    entity_types = list(ENTITY_TYPES.keys())
+    relation_types = list(RELATION_TYPES.keys())
+
     tokenizer = AutoTokenizer.from_pretrained("DeepPavlov/rubert-base-cased")
-    model = NERRelationModel().to(device)
+    model = NERRelationModel(
+        model_name="DeepPavlov/rubert-base-cased",
+        entity_types=entity_types,
+        relation_types=relation_types
+    ).to(device)
 
     # Загрузка данных
     train_dataset = NERELDataset("NEREL/NEREL-v1.0/train", tokenizer)
@@ -728,7 +734,7 @@ def train_model():
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 ner_labels=ner_labels,
-                rel_data=batch['rel_data'] 
+                rel_data=batch['rel_data']
             )
             logger.debug(f"[DEBUG] outputs keys: {outputs.keys()}")
 
@@ -1009,7 +1015,7 @@ def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
             unique_relations[key] = rel
 
     # Sort by confidence
-    sorted_relations = sorted(unique_relations.values(), 
+    sorted_relations = sorted(unique_relations.values(),
                             key=lambda x: x['confidence'], reverse=True)
 
     return {
