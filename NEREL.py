@@ -649,7 +649,7 @@ class NERELDataset(Dataset):
             'offset_mapping': encoding['offset_mapping'].squeeze(0)
         }
 
-        return ouput
+        return output
 
 def collate_fn(batch):
     # All elements already padded to max_length
@@ -715,8 +715,6 @@ def train_model():
     {'params': model.rel_classifiers.parameters(), 'lr': 1e-3}
 ])
 
-    # Training loop
-    best_ner_f1 = 0
     # Цикл обучения
     for epoch in range(2):
         model.train()
