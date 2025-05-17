@@ -736,7 +736,7 @@ def train_model():
 ])
 
     # Цикл обучения
-    for epoch in range(2):
+    for epoch in range(4):
         model.train()
         epoch_loss = 0
         ner_correct = ner_total = 0
