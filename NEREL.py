@@ -39,26 +39,26 @@ ENTITY_COLORS = {
 
 # Маппинг типов сущностей в числовые индексы
 ENTITY_TYPES = {
-    'PERSON': 1,
-    'PROFESSION': 2,
-    'ORGANIZATION': 3,
-    'FAMILY': 4,
-    'LOCATION': 5
+    'PERSON': 0,  # было 1
+    'PROFESSION': 1,  # было 2
+    'ORGANIZATION': 2,  # было 3
+    'FAMILY': 3,  # было 4
+    'LOCATION': 4  # было 5
 }
 
 # Маппинг типов отношений в числовые индексы
 RELATION_TYPES = {
-    'WORKS_AS': 1,
-    'MEMBER_OF': 2,
-    'FOUNDED_BY': 3,
-    'SPOUSE': 4,
-    'PARENT_OF': 5,
-    'SIBLING': 6,
-    'PART_OF': 7,
-    'WORKPLACE': 8,
-    'RELATIVE': 9
-
+    'WORKS_AS': 0,
+    'MEMBER_OF': 1,
+    'FOUNDED_BY': 2,
+    'SPOUSE': 3,
+    'PARENT_OF': 4,
+    'SIBLING': 5,
+    'PART_OF': 6,
+    'WORKPLACE': 7,
+    'RELATIVE': 8
 }
+
 
 VALID_COMB = {
     'WORKS_AS': [('PERSON', 'PROFESSION')],
