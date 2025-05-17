@@ -284,8 +284,7 @@ class NERRelationModel(nn.Module):
             if RELATION_TYPES_INV[label_idx] == 'FOUNDED_BY':
                 idx1, idx2 = idx2, idx1
 
-            label_str = self.relation_types.get(label, "UNKNOWN")
-            logger.debug(f"Processing relation {label_str} between {i1} and {i2}")
+            logger.debug(f"Processing relation {label} between {i1} and {i2}")
 
             rel_vec = self._relation_vector(x, idx1, idx2, label, cls_vec, device)
             rel_info[label].append((rel_vec, 1.0))
