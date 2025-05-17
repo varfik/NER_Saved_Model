@@ -712,7 +712,7 @@ def train_model():
     {'params': model.crf.parameters(), 'lr': 5e-5},
     {'params': model.gat1.parameters(), 'lr': 1e-3},
     {'params': model.gat2.parameters(), 'lr': 1e-3},
-    {'params': model.rel_classifiers.parameters(), 'lr': 1e-3}
+    {'params': model.rel_classifier.parameters(), 'lr': 1e-3}
 ])
 
     # Цикл обучения
