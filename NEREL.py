@@ -255,6 +255,10 @@ class NERRelationModel(nn.Module):
     # Обрабатывает одну запись в rel_data: извлекает представления сущностей,
     # формирует пары и вычисляет logits и метки
     def _process_relation_sample(self, batch_idx, sample, sequence_output, cls_token, device):
+        logger.debug(f"Sample entities: {entities}")
+        logger.debug(f"ID map: {id_map}")
+        logger.debug(f"Original pairs: {sample['pairs']}")
+        logger.debug(f"Original labels: {sample['labels']}")
         entities, id_map, x = self._encode_entities(sequence_output, batch_idx, sample, device)
         if x is None or len(id_map) < 2:
             return None
@@ -268,12 +272,17 @@ class NERRelationModel(nn.Module):
         # Положительные пары
         for (i1, i2), label in zip(sample['pairs'], sample['labels']):
             if i1 not in id_map or i2 not in id_map:
+                logger.warning(f"Pair ({i1}, {i2}) not found in id_map")
+                logger.warning(f"Available entities: {id_map.keys()}")
                 continue
             idx1, idx2 = id_map[i1], id_map[i2]
 
             # special case for FOUNDED_BY
             if self.relation_types[label] == 'FOUNDED_BY':
                 idx1, idx2 = idx2, idx1
+
+            label_str = self.relation_types.get(label, "UNKNOWN")
+            logger.debug(f"Processing relation {label_str} between {i1} and {i2}")
 
             rel_vec = self._relation_vector(x, idx1, idx2, label, cls_vec, device)
             rel_info[label].append((rel_vec, 1.0))
@@ -546,6 +555,7 @@ class NERELDataset(Dataset):
 
                     # Проверяем существование сущностей
                     if arg1 and arg2 and arg1 in entity_map and arg2 in entity_map:
+                        logger.debug(f"Relation: {rel_type} between {arg1} and {arg2}")
                         relations.append({
                             'type': rel_type,
                             'arg1': arg1,
