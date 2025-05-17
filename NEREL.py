@@ -17,6 +17,7 @@ from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
 import logging
+import unicodedata
 from sklearn.metrics.pairwise import cosine_similarity
 from termcolor import colored
 
