@@ -280,7 +280,8 @@ class NERRelationModel(nn.Module):
             idx1, idx2 = id_map[ent1_id], id_map[ent2_id]
 
             # special case for FOUNDED_BY
-            if RELATION_TYPES_INV[label] == 'FOUNDED_BY':
+            label_idx = int(label)
+            if RELATION_TYPES_INV[label_idx] == 'FOUNDED_BY':
                 idx1, idx2 = idx2, idx1
 
             label_str = self.relation_types.get(label, "UNKNOWN")
