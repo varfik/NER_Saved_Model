@@ -24,7 +24,7 @@ from termcolor import colored
 # Настройка логгера
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-logger.setLevel(logging.DEBUG)
+#logger.setLevel(logging.DEBUG)
 
 SYMMETRIC_RELATIONS = {'SIBLING', 'SPOUSE', 'RELATIVE'}
 
@@ -721,7 +721,7 @@ def train_model():
         sample_weights.append(1.0 if has_relations else 0.3)
 
     sampler = WeightedRandomSampler(sample_weights, len(train_dataset), replacement=True)
-    train_loader = DataLoader(train_dataset, batch_size=16, collate_fn=collate_fn, sampler=sampler)
+    train_loader = DataLoader(train_dataset, batch_size=4, collate_fn=collate_fn, sampler=sampler)
 
     # Optimizer with different learning rates
     optimizer = AdamW([
@@ -789,27 +789,23 @@ def train_model():
                     ner_correct += (pred == true).sum().item()
                     ner_total += seq_len
 
-            # Вычисление метрик для отношений
-            if outputs['rel_probs']:
-                rel_correct = 0
-                rel_total = 0
-                for rel_type, probs_labels in outputs['rel_probs'].items():
-                    if probs_labels:  # Если есть данные для этого типа отношений
-                        probs, labels = zip(*probs_labels)
-                        preds = torch.tensor([p > 0.5 for p in probs], device=device)
-                        true_labels = torch.tensor(labels, device=device)
-                        rel_correct += (preds == true_labels).sum().item()
-                        rel_total += len(true_labels)
-
-                if rel_total > 0:
-                    rel_acc = rel_correct / rel_total
-                    print(f"Relation Accuracy: {rel_acc:.2%} ({rel_correct}/{rel_total})")
+                # Вычисление метрик для отношений
+                if outputs['rel_probs']:
+                    for rel_type, probs_labels in outputs['rel_probs'].items():
+                        if probs_labels:  # Если есть данные для этого типа отношений
+                            probs, labels = zip(*probs_labels)
+                            preds = torch.tensor([p > 0.5 for p in probs], device=device)
+                            true_labels = torch.tensor(labels, device=device)
+                            rel_correct += (preds == true_labels).sum().item()
+                            rel_total += len(true_labels)
 
             if batch_idx % 10 == 0:
                 logger.info(
                     f"Batch {batch_idx}/{len(train_loader)} - "
                     f"Batch Loss: {loss.item():.4f} - "
-                    f"Avg Loss: {epoch_loss / (batch_idx + 1):.4f}"
+                    f"Avg Loss: {epoch_loss / (batch_idx + 1):.4f} - "
+                    f"NER Acc: {ner_correct / ner_total if ner_total > 0 else 0:.2%} - "
+                    f"Rel Acc: {rel_correct / rel_total if rel_total > 0 else 0:.2%}"
                 )
 
         # Evaluation metrics
@@ -822,6 +818,7 @@ def train_model():
         print(f"Relation Accuracy: {rel_acc:.2%} ({rel_correct}/{rel_total})")
 
     save_dir = "saved_model"
+    os.makedirs(save_dir, exist_ok=True)
     tokenizer.save_pretrained(save_dir)
     model.save_pretrained(save_dir)
     print(f"Model saved to {save_dir}")
