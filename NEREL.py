@@ -721,8 +721,9 @@ def train_model():
         epoch_loss = 0
         ner_correct = ner_total = 0
         rel_correct = rel_total = 0
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}")
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+        for batch_idx, batch in enumerate(progress_bar):
             optimizer.zero_grad()
 
             # Перенос данных на устройство
@@ -742,7 +743,8 @@ def train_model():
                 logger.warning(f"[WARN] Skipping batch due to missing loss")
                 continue
 
-            outputs['loss'].backward()
+            loss = outputs['loss']  # Make sure to capture the loss
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             epoch_loss += outputs['loss'].item()
