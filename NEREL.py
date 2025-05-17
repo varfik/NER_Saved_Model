@@ -1053,7 +1053,7 @@ if __name__ == "__main__":
     #     print(visualize_prediction_colored(result))
 
     # Для загрузки модели
-    loaded_model = NERRelationModel.from_pretrained("saved_model")
+    loaded_model = NERRelationModel.from_pretrained("saved_model", device="cpu")
     loaded_tokenizer = AutoTokenizer.from_pretrained("saved_model")
 
     # Использование модели
