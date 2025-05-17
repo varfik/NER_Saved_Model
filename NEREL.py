@@ -271,11 +271,13 @@ class NERRelationModel(nn.Module):
 
         # Положительные пары
         for (i1, i2), label in zip(sample['pairs'], sample['labels']):
-            if i1 not in id_map or i2 not in id_map:
+            ent1_id = f"T{i1}"
+            ent2_id = f"T{i2}"
+            if ent1_id not in id_map or ent2_id not in id_map:
                 logger.warning(f"Pair ({i1}, {i2}) not found in id_map")
-                logger.warning(f"Available entities: {id_map.keys()}")
+                logger.warning(f"Available entities: {list(id_map.keys())}")
                 continue
-            idx1, idx2 = id_map[i1], id_map[i2]
+            idx1, idx2 = id_map[ent1_id], id_map[ent2_id]
 
             # special case for FOUNDED_BY
             if RELATION_TYPES_INV[label] == 'FOUNDED_BY':
