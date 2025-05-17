@@ -240,10 +240,13 @@ class NERRelationModel(nn.Module):
             if self.training:
                 loss += self._compute_relation_loss(rel_logits, rel_labels, device)
 
+        rel_probs = torch.sigmoid(rel_logits)
+
         return {
             'ner_logits': ner_logits,
             'rel_logits': rel_logits,
             'rel_labels': rel_labels,
+            'rel_probs': rel_probs,
             'loss': loss if loss != 0 else None
         }
 
