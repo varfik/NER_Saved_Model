@@ -225,6 +225,7 @@ class NERRelationModel(nn.Module):
 
         rel_logits = defaultdict(list)
         rel_labels = defaultdict(list)
+        rel_probs = defaultdict(list)
 
         if rel_data:
             logger.debug(f"[Forward] Обработка {len(rel_data)} примеров с отношениями")
@@ -237,10 +238,12 @@ class NERRelationModel(nn.Module):
                     rel_logits[rel_type_idx].extend(scores)
                     rel_labels[rel_type_idx].extend(labels)
 
+                    # Преобразуем логиты в вероятности с помощью сигмоиды
+                    probs = [torch.sigmoid(score) for score in scores]
+                    rel_probs[rel_type_idx].extend(zip(probs, labels))  # Сохраняем (вероятность, метку)
+
             if self.training:
                 loss += self._compute_relation_loss(rel_logits, rel_labels, device)
-
-        rel_probs = torch.sigmoid(rel_logits)
 
         return {
             'ner_logits': ner_logits,
@@ -788,28 +791,19 @@ def train_model():
 
             # Вычисление метрик для отношений
             if outputs['rel_probs']:
-                for rel_type, probs in outputs['rel_probs'].items():
-                    if len(probs) > 0:
-                        # Убедимся, что probs - это тензор
-                        if isinstance(probs, list):
-                            probs = torch.cat([p.view(-1) for p in probs if p is not None]) if len(probs) > 0 else torch.tensor([], device=device)
+                rel_correct = 0
+                rel_total = 0
+                for rel_type, probs_labels in outputs['rel_probs'].items():
+                    if probs_labels:  # Если есть данные для этого типа отношений
+                        probs, labels = zip(*probs_labels)
+                        preds = torch.tensor([p > 0.5 for p in probs], device=device)
+                        true_labels = torch.tensor(labels, device=device)
+                        rel_correct += (preds == true_labels).sum().item()
+                        rel_total += len(true_labels)
 
-                        if len(probs) > 0:
-                            preds = (torch.sigmoid(probs) > 0.5).long()
-
-                            # Собираем метки для этого типа отношений
-                            targets = []
-                            for item in batch['rel_data']:
-                                if 'labels' in item and len(item['labels']) > 0:
-                                    # Фильтруем метки для текущего типа отношений
-                                    rel_labels = [l for l, t in zip(item['labels'], item.get('rel_types', [])) if t == rel_type]
-                                    targets.extend(rel_labels)
-
-                            if len(targets) > 0:
-                                # Обрезаем до минимальной длины
-                                min_len = min(len(preds), len(targets))
-                                rel_correct += (preds[:min_len] == torch.tensor(targets[:min_len], device=device)).sum().item()
-                                rel_total += min_len
+                if rel_total > 0:
+                    rel_acc = rel_correct / rel_total
+                    print(f"Relation Accuracy: {rel_acc:.2%} ({rel_correct}/{rel_total})")
 
             if batch_idx % 10 == 0:
                 logger.info(
