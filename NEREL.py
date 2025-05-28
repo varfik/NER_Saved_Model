@@ -758,7 +758,7 @@ class NERELDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def _find_entity_span(self, entity_text: str, full_text: str) -> Tuple[int, int] | None:
+    def _find_entity_span(self, entity_text, full_text):
         for match in re.finditer(re.escape(entity_text), full_text):
             return match.start(), match.end()
         return None
