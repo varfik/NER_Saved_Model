@@ -79,6 +79,7 @@ RELATION_TYPES_INV = {v: k for k, v in RELATION_TYPES.items()}
 class NERRelationModel(nn.Module):
     def __init__(self, model_name="DeepPavlov/rubert-base-cased", num_ner_labels=len(ENTITY_TYPES)*2+1, num_rel_labels=len(RELATION_TYPES), relation_types=None, entity_types=None):
         super().__init__()
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Initialize NER labels (0=O, 1=B-PER, 2=I-PER, ..., 9=B-LOC, 10=I-LOC)
         self.entity_type_to_idx = {etype: idx for idx, etype in enumerate(entity_types)}
         self.relation_types = relation_types
@@ -129,8 +130,8 @@ class NERRelationModel(nn.Module):
             nn.Dropout(0.2),
             nn.Linear(256, 1)
         )
-
         self._init_weights()
+        self.to(self.device)
 
     def _init_weights(self):
         for m in self.rel_classifier:
@@ -139,76 +140,168 @@ class NERRelationModel(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def _encode_entities(self, sequence_output, batch_idx, sample, device):
-        entities = [e for e in sample['entities'] if 'start' in e and 'end' in e]
-        if len(entities) < 2:
+        """Encode entities from sample into embeddings.
+
+            Args:
+                sequence_output: Tensor of shape [batch_size, seq_len, hidden_size]
+                batch_idx: Index of current sample in batch
+                sample: Dictionary containing 'entities' list
+                device: Target device for tensors
+
+            Returns:
+                tuple: (entities, id_map, embeddings) or (None, None, None) if invalid
+            """
+        if not isinstance(sample, dict) or 'entities' not in sample:
+            logger.warning(f"Invalid sample format in batch {batch_idx}")
+            return None, None, None
+
+        if sequence_output is None or batch_idx >= sequence_output.shape[0]:
+            logger.warning(f"Invalid batch index or sequence output in batch {batch_idx}")
+            return None, None, None
+
+        valid_entities = []
+        for e in sample.get('entities', []):
+            if not all(k in e for k in ['start', 'end', 'type', 'id']):
+                logger.debug(f"Skipping invalid entity in batch {batch_idx}: missing required fields")
+                continue
+
+            if e['start'] >= e['end']:
+                logger.debug(f"Skipping invalid entity span in batch {batch_idx}: start >= end")
+                continue
+
+            valid_entities.append(e)
+
+        if len(valid_entities) < 2:
             if self.training:
-                logger.debug(f"Пропуск примера {batch_idx}: недостаточно сущностей ({len(entities)})")
+                logger.debug(f"Skipping batch {batch_idx}: not enough entities ({len(valid_entities)})")
             return None, None, None
 
         entity_embeds, id_map = [], {}
-        for i, e in enumerate(entities):
-            start, end = e['start'], e['end']
+        unknown_types = set()
+
+        for i, e in enumerate(valid_entities):
+            start = max(0, min(e['start'], sequence_output.shape[1] - 1))
+            end = max(start, min(e['end'], sequence_output.shape[1] - 1))
+
             token_embeds = sequence_output[batch_idx, start:end + 1]
+            if token_embeds.shape[0] == 0:
+                logger.debug(f"Empty token embeddings for entity {e['id']} in batch {batch_idx}")
+                continue
+
+            # Взвешенное pooling
             attention_scores = token_embeds @ token_embeds.mean(dim=0)
             attention_weights = torch.softmax(attention_scores, dim=0)
             pooled = torch.sum(token_embeds * attention_weights.unsqueeze(-1), dim=0)
 
-            try:
-                type_idx = self.entity_type_to_idx.get(e['type'], -1)
-            except ValueError:
-                logger.warning(f"[Batch {batch_idx}] Неизвестный тип сущности: {e['type']}")
+            # Обработка типа сущности
+            type_idx = self.entity_type_to_idx.get(e['type'], -1)
+            if type_idx == -1:
+                if e['type'] not in unknown_types:
+                    logger.warning(f"Unknown entity type '{e['type']}' in batch {batch_idx}")
+                    unknown_types.add(e['type'])
                 continue
 
-            type_emb = self.entity_type_emb(torch.tensor(type_idx, device=device))
+            with torch.no_grad():
+                type_emb = self.entity_type_emb(torch.tensor(type_idx, device=device))
             entity_embeds.append(pooled + type_emb)
             id_map[e['id']] = len(entity_embeds) - 1
 
         if len(entity_embeds) < 2:
+            logger.debug(f"Not enough valid entity embeddings in batch {batch_idx}")
             return None, None, None
 
-        x = torch.stack(entity_embeds)
-        return entities, id_map, x
+        try:
+            x = torch.stack(entity_embeds)
+        except RuntimeError as e:
+            logger.error(f"Failed to stack entity embeddings in batch {batch_idx}: {str(e)}")
+            return None, None, None
+
+        return valid_entities, id_map, x
 
     def _compute_gat(self, x, device=None):
+        """Apply Graph Attention Network layers.
+
+            Args:
+                x: Tensor of shape [num_nodes, hidden_size] with node features
+                device: Target device (inferred from x if None)
+
+            Returns:
+                Updated node representations
+            """
+        device = device or x.device
         edge_index = self._build_knn_graph(x, k=5)
 
-        if edge_index is None or edge_index.size(1) == 0:
-            logger.debug(f"[GAT] Переход к fallback: пустой граф.")
+        if edge_index.size(1) == 0:
+            logger.debug("[GAT] Empty graph - using fallback (no message passing)")
             return x  # fallback — без графа
 
-        # (опционально) добавляем обратные связи
-        reversed_edges = edge_index[[1, 0], :]
-        edge_index = torch.cat([edge_index, reversed_edges], dim=1)
+        if not self.training:  # В режиме инференса сохраняем только уникальные ребра
+            edge_index = torch.unique(edge_index, dim=1)
+        else:
+            # В тренировочном режиме добавляем обратные связи
+            reversed_edges = edge_index[[1, 0], :]
+            edge_index = torch.cat([edge_index, reversed_edges], dim=1)
+            edge_index = torch.unique(edge_index, dim=1)  # Удаляем дубликаты
 
-        # (опционально) добавляем self-loops
-        loops = torch.arange(x.size(0), device=x.device).unsqueeze(0).repeat(2, 1)
-        edge_index = torch.cat([edge_index, loops], dim=1)
+            # Добавляем self-loops если их еще нет
+        num_nodes = x.size(0)
+        self_loops = torch.arange(num_nodes, device=device).repeat(2, 1)
+        edge_index = torch.cat([edge_index, self_loops], dim=1)
+        edge_index = torch.unique(edge_index, dim=1)  # Удаляем дубликаты
 
-        x = self.gat1(x, edge_index)
-        x = self.norm1(x)
-        x = F.elu(x)
+        try:
+            x = self.gat1(x, edge_index)
+            x = self.norm1(x)
+            x = F.elu(x)
 
-        x = self.gat2(x, edge_index)
-        x = self.norm2(x)
-        x = F.elu(x)
+            x = self.gat2(x, edge_index)
+            x = self.norm2(x)
+            x = F.elu(x)
 
-        logger.debug(f"[GAT] Построен граф: {edge_index.size(1)} рёбер для {x.size(0)} узлов.")
+            logger.debug(f"[GAT] Applied GAT with {edge_index.size(1)} edges "
+                         f"for {num_nodes} nodes")
+        except RuntimeError as e:
+            logger.error(f"[GAT] Error in GAT layers: {str(e)}")
+            return x  # Fallback в случае ошибки
+
         return x
 
     def _build_knn_graph(self, x, k=5):
+        """Build KNN graph based on cosine similarity.
+
+           Args:
+               x: Tensor of shape [num_nodes, hidden_size] with node embeddings
+               k: Number of nearest neighbors to connect
+
+           Returns:
+               edge_index: Tensor of shape [2, num_edges] with graph edges
+           """
+        if x.size(0) < 2:  # Нельзя построить граф для <2 узлов
+            logger.debug("[KNN] Not enough nodes to build graph")
+            return torch.empty((2, 0), dtype=torch.long, device=x.device)
+
         with torch.no_grad():
-            x_cpu = x.cpu().numpy()
-            sim = cosine_similarity(x_cpu)
-            edge_index = []
-            for i in range(len(sim)):
-                topk = sim[i].argsort()[-(k + 1):][::-1]  # k+1, т.к. self — в топе
-                for j in topk:
-                    if i != j:
-                        edge_index.append((i, j))
-            edge_index = torch.tensor(edge_index, dtype=torch.long).t().to(x.device)
+            # Используем torch.cosine_similarity вместо sklearn для работы на GPU
+            x_norm = F.normalize(x, p=2, dim=1)
+            sim_matrix = torch.mm(x_norm, x_norm.t())  # [num_nodes, num_nodes]
 
-            logger.debug(f"[KNN] Эмбеддинги: {x.shape}, сгенерировано рёбер: {len(edge_index[0])}")
+            # Получаем топ-k соседей для каждого узла (исключая себя)
+            topk_values, topk_indices = torch.topk(sim_matrix, k=k + 1, dim=1)  # +1 чтобы учесть self-loop
+            # Создаем ребра
+            edge_list = []
+            for i in range(x.size(0)):
+                for j in topk_indices[i]:
+                    if i != j and topk_values[i, j] > 0.1:  # Порог сходства
+                        edge_list.append((i, j))
 
+            if not edge_list:
+                logger.debug("[KNN] No edges created - all similarities below threshold")
+                return torch.empty((2, 0), dtype=torch.long, device=x.device)
+
+            edge_index = torch.tensor(edge_list, dtype=torch.long, device=x.device).t()
+
+            logger.debug(f"[KNN] Built graph with {edge_index.size(1)} edges "
+                         f"for {x.size(0)} nodes (k={k})")
             return edge_index
 
     def forward(self, input_ids, attention_mask, ner_labels=None, rel_data=None):
@@ -262,59 +355,181 @@ class NERRelationModel(nn.Module):
     # Обрабатывает одну запись в rel_data: извлекает представления сущностей,
     # формирует пары и вычисляет logits и метки
     def _process_relation_sample(self, batch_idx, sample, sequence_output, cls_token, device):
+        if not sample or 'pairs' not in sample or 'labels' not in sample:
+            logger.debug(f"Invalid sample format in batch {batch_idx}")
+            return None
         entities, id_map, x = self._encode_entities(sequence_output, batch_idx, sample, device)
+        if x is None or len(id_map) < 2:
+            return None
         logger.debug(f"Sample entities: {entities}")
         logger.debug(f"ID map: {id_map}")
         logger.debug(f"Original pairs: {sample['pairs']}")
         logger.debug(f"Original labels: {sample['labels']}")
-        if x is None or len(id_map) < 2:
+        try:
+            x = self._compute_gat(x, device)
+        except RuntimeError as e:
+            logger.error(f"GAT failed in batch {batch_idx}: {str(e)}")
             return None
 
-        x = self._compute_gat(x, device)
         cls_vec = cls_token[batch_idx]
-
         rel_info = defaultdict(list)
-        pos_indices_by_type = defaultdict(list)
 
-        # Положительные пары
-        for (i1, i2), label in zip(sample['pairs'], sample['labels']):
-            ent1_id = f"T{i1}"
-            ent2_id = f"T{i2}"
-            if ent1_id not in id_map or ent2_id not in id_map:
-                logger.warning(f"Pair ({i1}, {i2}) not found in id_map")
-                logger.warning(f"Available entities: {list(id_map.keys())}")
-                continue
-            idx1, idx2 = id_map[ent1_id], id_map[ent2_id]
+        pos_pairs = self._process_positive_relations(
+            sample, id_map, x, cls_vec, device, batch_idx
+        )
 
-            # special case for FOUNDED_BY
-            label_idx = int(label)
-            if RELATION_TYPES_INV[label_idx] == 'FOUNDED_BY':
-                idx1, idx2 = idx2, idx1
-
-            logger.debug(f"Processing relation {label} between {i1} and {i2}")
-
-            label_idx = int(label) if isinstance(label, str) and label.isdigit() else label
-            rel_vec = self._relation_vector(x, idx1, idx2, label_idx, cls_vec, device)
-            rel_info[label].append((rel_vec, 1.0))
-            pos_indices_by_type[label].append((idx1, idx2))
-
-        logger.debug(f"[Batch {batch_idx}] Положительные пары: {sum(len(v) for v in pos_indices_by_type.values())}")
-
-        # Отрицательные пары
         if self.training:
-            for rel_type_idx, rel_type in enumerate(self.relation_types):
-                negatives = self._get_negatives(x, entities, rel_type_idx, rel_type, pos_indices_by_type, device)
-                for i, j in negatives:
-                    rel_vec = self._relation_vector(x, i, j, rel_type_idx, cls_vec, device)
-                    rel_info[rel_type_idx].append((rel_vec, 0.0))
+            neg_pairs = self._generate_negative_relations(
+                x, entities, pos_pairs, device, batch_idx
+            )
+            rel_info.update(neg_pairs)
 
         return rel_info
 
+    def _process_positive_relations(self, sample, id_map, x, cls_vec, device, batch_idx):
+        """Process positive relations with symmetric handling."""
+        pos_pairs = defaultdict(list)
+        entity_pairs = set()  # Track all unique entity pairs
+
+        for (i1, i2), label in zip(sample['pairs'], sample['labels']):
+            # Convert and validate entity IDs
+            ent1_id, ent2_id = f"T{i1}", f"T{i2}"
+            if ent1_id not in id_map or ent2_id not in id_map:
+                continue
+
+            idx1, idx2 = id_map[ent1_id], id_map[ent2_id]
+            label_idx = self._validate_relation_label(label, batch_idx)
+            if label_idx is None:
+                continue
+
+            # Handle symmetric relations
+            if self.relation_types[label_idx] in SYMMETRIC_RELATIONS:
+                idx1, idx2 = sorted([idx1, idx2])
+
+            # Skip duplicates
+            if (idx1, idx2) in entity_pairs:
+                continue
+            entity_pairs.add((idx1, idx2))
+
+            # Create relation vector
+            rel_vec = self._create_relation_vector(x, idx1, idx2, label_idx, cls_vec, device)
+            pos_pairs[label_idx].append((rel_vec, 1.0))
+
+        return pos_pairs
+
+    def _generate_negative_relations(self, x, entities, pos_pairs, device, batch_idx):
+        """Generate hard negative samples focusing on semantically similar pairs."""
+        neg_pairs = defaultdict(list)
+        entity_types = [e['type'] for e in entities]
+        num_entities = len(entities)
+
+        # Precompute all valid type combinations
+        valid_masks = {}
+        for rel_type_idx in range(len(self.relation_types)):
+            rel_type = self.relation_types[rel_type_idx]
+            mask = torch.zeros((num_entities, num_entities), dtype=torch.bool, device=device)
+
+            for i, j in torch.nditer(torch.arange(num_entities), torch.arange(num_entities)):
+                if i != j and (entity_types[i], entity_types[j]) in VALID_COMB.get(rel_type, []):
+                    mask[i, j] = True
+            valid_masks[rel_type_idx] = mask
+
+        # Generate negatives for each relation type
+        for rel_type_idx in range(len(self.relation_types)):
+            pos_set = {(i, j) for i, j, _ in pos_pairs.get(rel_type_idx, [])}
+            valid_mask = valid_masks[rel_type_idx]
+
+            # Get candidate pairs
+            candidates = (valid_mask & ~self._pairs_to_mask(pos_set, num_entities)).nonzero()
+
+            if len(candidates) == 0:
+                continue
+
+            # Hard negative mining
+            neg_samples = self._sample_hard_negatives(
+                x, candidates, pos_pairs.get(rel_type_idx, []),
+                n_samples=min(3 * len(pos_set), len(candidates))
+            )
+
+            # Create negative vectors
+            for i, j in neg_samples:
+                rel_vec = self._create_relation_vector(x, i, j, rel_type_idx, cls_vec, device)
+                neg_pairs[rel_type_idx].append((rel_vec, 0.0))
+
+        return neg_pairs
+
+    def _pairs_to_mask(self, pairs, num_entities):
+        """
+        Convert list of entity pairs to boolean adjacency matrix.
+
+        Args:
+            pairs: Set/Tensor/List of tuples (i,j) representing relations
+            num_entities: Total number of entities in the sample
+
+        Returns:
+            mask: Boolean tensor of shape [num_entities, num_entities]
+        """
+        mask = torch.zeros((num_entities, num_entities), dtype=torch.bool, device=self.device)
+        if not pairs:
+            return mask
+
+        # Convert different input formats to tensor
+        if isinstance(pairs, set):
+            pairs = torch.tensor(list(pairs), device=self.device)
+        elif isinstance(pairs, list):
+            pairs = torch.tensor(pairs, device=self.device)
+
+        # Fill the mask
+        mask[pairs[:, 0], pairs[:, 1]] = True
+        return mask
+
     # Создаёт вектор признаков для пары сущностей и пропускает через классификатор отношений
-    def _relation_vector(self, x, idx1, idx2, rel_type_idx, cls_vec, device):
-        rel_type_tensor = self.rel_type_emb(torch.tensor(rel_type_idx, device=device))
-        pair_vec = torch.cat([x[idx1], x[idx2], rel_type_tensor, cls_vec])
-        return self.rel_classifier(pair_vec).squeeze()
+    def _create_relation_vector(self, x, idx1, idx2, rel_type_idx, cls_vec, device):
+        """Optimized relation vector creation."""
+        device = device or self.device
+        with torch.no_grad():
+            rel_type_tensor = self.rel_type_emb(
+                torch.tensor(rel_type_idx, device=device)
+            )
+        return torch.cat([
+            x[idx1],
+            x[idx2],
+            rel_type_tensor,
+            cls_vec
+        ])
+
+    def _sample_hard_negatives(self, x, candidates, pos_pairs, n_samples):
+        """Select hard negatives using similarity metrics."""
+        if not pos_pairs or n_samples <= 0:
+            return candidates[:n_samples]
+
+        # Compute positive mean embedding
+        pos_emb = torch.stack([
+            torch.cat([x[i], x[j]]) for i, j, _ in pos_pairs
+        ]).mean(0)
+
+        # Compute candidate similarities
+        cand_emb = torch.cat([x[candidates[:, 0]], x[candidates[:, 1]]], dim=1)
+        sim = F.cosine_similarity(
+            cand_emb,
+            pos_emb.unsqueeze(0),
+            dim=1
+        )
+
+        # Select most similar negatives
+        _, indices = torch.topk(sim, k=min(n_samples, len(sim)))
+        return candidates[indices]
+
+    def _validate_relation_label(self, label, batch_idx):
+        """Validate and normalize relation labels."""
+        try:
+            label_idx = int(label)
+            if 0 <= label_idx < len(self.relation_types):
+                return label_idx
+        except (ValueError, TypeError):
+            pass
+        logger.warning(f"Invalid relation label {label} in batch {batch_idx}")
+        return None
 
     # Вычисляет loss для задачи извлечения отношений.
     def _compute_relation_loss(self, rel_logits, rel_labels, device):
@@ -386,89 +601,48 @@ class NERRelationModel(nn.Module):
         return [tuple(pair.cpu().tolist()) for pair in selected_pairs]
 
     def save_pretrained(self, save_dir, tokenizer=None):
+        """Сохраняет модель и конфигурацию в указанную директорию"""
         os.makedirs(save_dir, exist_ok=True)
 
-        # 1. Сохраняем веса модели
-        model_path = os.path.join(save_dir, "pytorch_model.bin")
-        torch.save(self.state_dict(), model_path)
-
-        # 2. Сохраняем конфигурацию модели
-        config = {
-            "model_type": "bert-ner-rel",
-            "model_name": getattr(self.bert, "name_or_path", "custom"),
-            "num_ner_labels": self.num_ner_labels,
-            "num_rel_labels": self.num_rel_labels,
-            "entity_types": self.entity_types,  # ← добавлено
-            "relation_types": self.relation_types,  # ← добавлено
-            "bert_config": self.bert.config.to_diff_dict(),
-            "model_config": {
-                "gat_hidden_size": 64,
-                "gat_heads": 4
+        # Сохраняем модель и конфигурацию
+        torch.save({
+            'state_dict': self.state_dict(),
+            'config': {
+                'num_ner_labels': self.num_ner_labels,
+                'num_rel_labels': self.num_rel_labels,
+                'entity_types': self.entity_types,
+                'relation_types': self.relation_types,
+                'bert_config': self.bert.config.to_dict()
             }
-        }
+        }, os.path.join(save_dir, "model.bin"))
 
-        config_path = os.path.join(save_dir, "config.json")
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-
-        # 3. Сохраняем токенизатор
-        if tokenizer is not None:
+        # Сохраняем токенизатор если предоставлен
+        if tokenizer:
             tokenizer.save_pretrained(save_dir)
 
     @classmethod
-    def from_pretrained(cls, model_dir, device="cuda"):
-        try:
-            device = torch.device(device)
+    def from_pretrained(cls, model_dir, device=None):
+        """Загружает модель из указанной директории"""
+        device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-            # 1. Загружаем конфигурацию
-            config_path = os.path.join(model_dir, "config.json")
-            if not os.path.exists(config_path):
-                raise FileNotFoundError(f"Config file not found at {config_path}")
+        # Загружаем сохраненные данные
+        model_data = torch.load(os.path.join(model_dir, "model.bin"), map_location=device)
+        config = model_data['config']
 
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
+        # Инициализируем модель
+        model = cls(
+            model_name=model_dir,
+            num_ner_labels=config['num_ner_labels'],
+            num_rel_labels=config['num_rel_labels'],
+            entity_types=config['entity_types'],
+            relation_types=config['relation_types']
+        )
 
-            # Проверки
-            if "entity_types" not in config or "relation_types" not in config:
-                raise ValueError("Missing 'entity_types' or 'relation_types' in config")
+        # Загружаем веса
+        model.load_state_dict(model_data['state_dict'])
+        model.to(device).eval()
 
-            entity_types = config["entity_types"]
-            relation_types = config["relation_types"]
-
-            # 2. Инициализируем BERT
-            bert_config = BertConfig.from_dict(config["bert_config"])
-            bert = AutoModel.from_pretrained(
-                model_dir,
-                config=bert_config,
-                ignore_mismatched_sizes=True
-            )
-
-            # 3. Создаем экземпляр модели
-            model = cls(
-                model_name=config.get("model_name", "DeepPavlov/rubert-base-cased"),
-                num_ner_labels=config.get("num_ner_labels", len(entity_types) * 2 + 1),
-                num_rel_labels=config.get("num_rel_labels", len(relation_types)),
-                entity_types=entity_types,
-                relation_types=relation_types
-            ).to(device)
-
-            # 4. Загружаем веса
-            model_path = os.path.join(model_dir, "pytorch_model.bin")
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(f"Model weights not found at {model_path}")
-
-            state_dict = torch.load(model_path, map_location=device)
-            model.load_state_dict(state_dict)
-
-            # 5. Устанавливаем BERT
-            model.bert = bert.to(device)
-
-            model.eval()
-            return model
-
-        except Exception as e:
-            raise RuntimeError(f"Error loading model from {model_dir}: {str(e)}")
-
+        return model
 
 class NERELDataset(Dataset):
     def __init__(self, data_dir, tokenizer, max_length=512):
@@ -476,6 +650,10 @@ class NERELDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.samples = self._load_samples()
+
+        self.misaligned_entities = 0
+        self.total_entities = 0
+        self.skipped_relations_due_to_alignment = 0
 
     def _load_samples(self):
         samples = []
@@ -526,20 +704,23 @@ class NERELDataset(Dataset):
                     entity_text = parts[2]
                     extracted_text = text[start:end]
 
-                    # Verify entity span matches text
-                    if extracted_text != entity_text:
-                        # Try to find correct span
-                        logger.debug(f"Misalignment detected:\n"
-                                     f"  entity_id: {entity_id}\n"
-                                     f"  expected: '{entity_text}'\n"
-                                     f"  found:    '{extracted_text}'\n"
-                                     f"  context:  '{text[start - 20:end + 20].replace(chr(10), '⏎')}'")
-                        # if found_pos != -1:
-                        #     start = found_pos
-                        #     end = found_pos + len(entity_text)
-                        logger.warning(f"Entity alignment failed: Entity: '{entity_text}' ({entity_type}), "
-                                       f"Span: {start}-{end}, Text: '{text[start - 10:end + 10]}'")
-                        # Пропускать сущности, которые не найдены в тексте
+                    norm_extracted = unicodedata.normalize("NFC", text[start:end].replace('\u00A0', ' '))
+                    norm_expected = unicodedata.normalize("NFC", entity_text.replace('\u00A0', ' '))
+
+                    if norm_extracted != norm_expected:
+                        recovered = self._find_entity_span(norm_expected, text)
+                        if recovered:
+                            start, end = recovered
+                        else:
+                            logger.debug(f"Misalignment detected:\n"
+                                         f"  entity_id: {entity_id}\n"
+                                         f"  expected: '{entity_text}'\n"
+                                         f"  found:    '{extracted_text}'\n"
+                                         f"  context:  '{text[start - 20:end + 20].replace(chr(10), '⏎')}'")
+                            logger.warning(f"Entity alignment failed: Entity: '{entity_text}' ({entity_type}), "
+                                           f"Span: {start}-{end}, Text: '{text[start - 10:end + 10]}'")
+                            self.misaligned_entities += 1
+                            continue
 
                     entity = {
                         'id': entity_id,
@@ -577,6 +758,11 @@ class NERELDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _find_entity_span(self, entity_text: str, full_text: str) -> Tuple[int, int] | None:
+        for match in re.finditer(re.escape(entity_text), full_text):
+            return match.start(), match.end()
+        return None
+
     def __getitem__(self, idx):
         sample = self.samples[idx]
         text = sample['text']
@@ -606,7 +792,7 @@ class NERELDataset(Dataset):
             for i, (start, end) in enumerate(offset_mapping):
                 if start == end:
                     continue  # спецтокены
-                if start <= entity['end'] and end >= entity['start']:
+                if start >= entity['start'] and end <= entity['end']:
                     matched_tokens.append(i)
 
             # if not matched_tokens:
@@ -652,6 +838,9 @@ class NERELDataset(Dataset):
             idx1 = token_entity_id_to_idx.get(relation['arg1'], -1)
             idx2 = token_entity_id_to_idx.get(relation['arg2'], -1)
             if idx1 == -1 or idx2 == -1:
+                self.skipped_relations_due_to_alignment += 1
+                logger.warning(
+                    f"Relation '{relation['type']}' skipped: unresolved entity id(s): {relation['arg1']}, {relation['arg2']}")
                 continue
             if relation['type'] in SYMMETRIC_RELATIONS:
                 idx1, idx2 = sorted([idx1, idx2])
@@ -672,165 +861,193 @@ class NERELDataset(Dataset):
 
         return output
 
-def collate_fn(batch):
+def collate_fn(batch, device=None):
     # All elements already padded to max_length
     input_ids = torch.stack([item['input_ids'] for item in batch])
     attention_mask = torch.stack([item['attention_mask'] for item in batch])
     ner_labels = torch.stack([item['ner_labels'] for item in batch])
     offset_mapping = torch.stack([item['offset_mapping'] for item in batch])
 
-    device = input_ids.device
+    device = device or input_ids.device
 
     rel_data = []
     # Собираем rel_data как список словарей
     for item in batch:
+        if item['rel_data']['pairs']:
+            pairs = torch.tensor(item['rel_data']['pairs'],
+                                 dtype=torch.long).to(device)
+        else:
+            pairs = torch.zeros((0, 2), dtype=torch.long, device=device)
+
+            # Обрабатываем метки
+        if item['rel_data']['labels']:
+            labels = torch.tensor(item['rel_data']['labels'],
+                                  dtype=torch.long).to(device)
+        else:
+            labels = torch.zeros(0, dtype=torch.long, device=device)
+
         rel_entry = {
             'entities': item['rel_data']['entities'],
-            'pairs': torch.tensor(item['rel_data']['pairs'], dtype=torch.long) if item['rel_data']['pairs'] else torch.zeros((0, 2), dtype=torch.long),
-            'labels': torch.tensor(item['rel_data']['labels'], dtype=torch.long) if item['rel_data']['labels'] else torch.zeros(0, dtype=torch.long),
-            'rel_types': [RELATION_TYPES_INV.get(l, 'UNK') for l in item['rel_data']['labels']] if item['rel_data']['labels'] else []
+            'pairs': pairs,
+            'labels': labels,
+            'rel_types': [RELATION_TYPES_INV.get(l, 'UNK')
+                          for l in item['rel_data']['labels']] if item['rel_data']['labels'] else []
         }
         rel_data.append(rel_entry)
 
     return {
-        'input_ids': input_ids,
-        'attention_mask': attention_mask,
-        'ner_labels': ner_labels,
+        'input_ids': input_ids.to(device),
+        'attention_mask': attention_mask.to(device),
+        'ner_labels': ner_labels.to(device),
         'rel_data': rel_data,
         'texts': [item['text'] for item in batch],
-        'offset_mapping': offset_mapping
+        'offset_mapping': offset_mapping.to(device)
     }
+
+
+def _update_metrics(self, metrics, outputs, batch):
+    """Обновление метрик NER и отношений"""
+    # Метрики NER
+    preds = outputs.get("ner_preds", [])
+    trues = batch["ner_labels"]
+    mask = batch["attention_mask"].bool()
+
+    for pred, true, m in zip(preds, trues, mask):
+        valid = m.sum().item()
+        metrics["ner"]["correct"] += (pred[:valid] == true[:valid]).sum().item()
+        metrics["ner"]["total"] += valid
+
+    # Метрики отношений
+    if "rel_probs" in outputs:
+        for rel_type, probs_labels in outputs["rel_probs"].items():
+            if probs_labels:
+                probs, labels = zip(*probs_labels)
+                preds = [p > 0.5 for p in probs]
+                metrics["rel"]["correct"] += sum(p == l for p, l in zip(preds, labels))
+                metrics["rel"]["total"] += len(labels)
 
 def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # Инициализация модели и токенизатора
-    entity_types = list(ENTITY_TYPES.keys())
-    relation_types = list(RELATION_TYPES.keys())
+    config = {
+        "batch_size": 8,  # Увеличенный размер батча
+        "num_epochs": 1,
+        "lr_bert": 2e-5,
+        "lr_ner": 3e-4,
+        "lr_gat": 5e-4,
+        "lr_rel": 5e-4,
+        "grad_clip": 1.0,
+        "warmup_steps": 500,
+        "balance_alpha": 0.7  # Коэффициент баланса NER vs RE
+    }
 
     tokenizer = AutoTokenizer.from_pretrained("DeepPavlov/rubert-base-cased")
     model = NERRelationModel(
         model_name="DeepPavlov/rubert-base-cased",
-        entity_types=entity_types,
-        relation_types=relation_types
+        entity_types=list(ENTITY_TYPES.keys()),
+        relation_types=list(RELATION_TYPES.keys())
     ).to(device)
 
     # Загрузка данных
     train_dataset = NERELDataset("NEREL/NEREL-v1.0/train", tokenizer)
 
-    # Create weighted sampler to balance relation examples
-    sample_weights = []
-    for sample in train_dataset:
-        has_relations = len(sample['rel_data']['labels']) > 0
-        sample_weights.append(1.0 if has_relations else 0.3)
-
+    relation_counts = [len(sample['rel_data']['labels']) for sample in train_dataset]
+    median_count = np.median([c for c in relation_counts if c > 0])
+    sample_weights = [
+        0.3 + 0.7 * (min(count, 2 * median_count) / (2 * median_count))
+        for count in relation_counts
+    ]
     sampler = WeightedRandomSampler(sample_weights, len(train_dataset), replacement=True)
-    train_loader = DataLoader(train_dataset, batch_size=4, collate_fn=collate_fn, sampler=sampler)
 
-    # Optimizer with different learning rates
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config["batch_size"],
+        collate_fn=collate_fn,
+        sampler=sampler,
+        pin_memory=True
+    )
+
     optimizer = AdamW([
-    {'params': model.bert.parameters(), 'lr': 3e-5},
-    {'params': model.ner_classifier.parameters(), 'lr': 5e-5},
-    {'params': model.crf.parameters(), 'lr': 5e-5},
-    {'params': model.gat1.parameters(), 'lr': 1e-3},
-    {'params': model.gat2.parameters(), 'lr': 1e-3},
-    {'params': model.rel_classifier.parameters(), 'lr': 1e-3}
-])
+        {"params": model.bert.parameters(), "lr": config["lr_bert"]},
+        {"params": model.ner_classifier.parameters(), "lr": config["lr_ner"]},
+        {"params": model.crf.parameters(), "lr": config["lr_ner"]},
+        {"params": chain(model.gat1.parameters(), model.gat2.parameters()),
+         "lr": config["lr_gat"]},
+        {"params": model.rel_classifier.parameters(), "lr": config["lr_rel"]}
+    ])
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=config["warmup_steps"],
+        num_training_steps=len(train_loader) * config["num_epochs"]
+    )
 
     # Цикл обучения
-    for epoch in range(4):
+    for epoch in range(config["num_epochs"]):
         model.train()
         epoch_loss = 0
-        ner_correct = ner_total = 0
-        rel_correct = rel_total = 0
+        metrics = {
+            "ner": {"correct": 0, "total": 0},
+            "rel": {"correct": 0, "total": 0}
+        }
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}")
 
-        for batch_idx, batch in enumerate(progress_bar):
-            optimizer.zero_grad()
+        for batch in progress_bar:
+            # Перенос данных с автоматической оптимизацие
+            batch = {
+                k: v.to(device) if torch.is_tensor(v) else v
+                for k, v in batch.items()
+            }
 
-            # Перенос данных на устройство
-            input_ids = batch['input_ids'].to(device)
-            attention_mask =  batch['attention_mask'].to(device)
-            ner_labels = batch['ner_labels'].to(device)
-
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                ner_labels=ner_labels,
-                rel_data=batch['rel_data']
-            )
-            logger.debug(f"[DEBUG] outputs keys: {outputs.keys()}")
-
-            if outputs['loss'] is None:
-                logger.warning(f"[WARN] Skipping batch due to missing loss")
+            # Forward pass с обработкой ошибок
+            try:
+                outputs = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    ner_labels=batch["ner_labels"],
+                    rel_data=batch["rel_data"]
+                )
+                if outputs["loss"] is None:
+                    continue
+            except RuntimeError as e:
+                logger.error(f"Batch failed: {str(e)}")
                 continue
 
-            loss = outputs['loss']  # Make sure to capture the loss
+            # Backward pass с градиентным клиппингом
+            loss = outputs["loss"] * config["balance_alpha"] + \
+                   outputs.get("rel_loss", 0) * (1 - config["balance_alpha"])
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                config["grad_clip"]
+            )
             optimizer.step()
-            epoch_loss += outputs['loss'].item()
+            scheduler.step()
+            optimizer.zero_grad()
 
-            # Обновляем progress bar с текущим loss
+            # Обновление метрик
+            epoch_loss += loss.item()
+            self._update_metrics(metrics, outputs, batch)
+
+            # Обновление progress bar
             progress_bar.set_postfix({
-                'batch_loss': f"{loss.item():.4f}",
-                'avg_loss': f"{epoch_loss / (batch_idx + 1):.4f}"
+                "loss": f"{loss.item():.4f}",
+                "ner_acc": f"{metrics['ner']['correct'] / metrics['ner']['total']:.2%}",
+                "rel_acc": f"{metrics['rel']['correct'] / metrics['rel']['total']:.2%}"
             })
 
-            # NER metrics
-            with torch.no_grad():
-                mask = attention_mask.bool()
-                ner_preds = model.crf.decode(outputs['ner_logits'], mask=mask)
+        # Логирование
+        print(f"\nEpoch {epoch + 1} Results:")
+        print(f"Train Loss: {epoch_loss / len(train_loader):.4f}")
+        print(f"NER: Acc={metrics['ner']['correct'] / metrics['ner']['total']:.2%}")
+        print(f"Relations: Acc={metrics['rel']['correct'] / metrics['rel']['total']:.2%}")
 
-                # Перебираем каждый пример в батче
-                for i in range(len(ner_preds)):
-                    # Получаем длину последовательности без паддинга
-                    seq_len = mask[i].sum().item()
-                    # Берем только нужные элементы (без паддинга)
-                    pred = torch.tensor(ner_preds[i][:seq_len], device=device)
-                    true = ner_labels[i][:seq_len]
-
-                    ner_correct += (pred == true).sum().item()
-                    ner_total += seq_len
-
-                # Вычисление метрик для отношений
-                if outputs['rel_probs']:
-                    for rel_type, probs_labels in outputs['rel_probs'].items():
-                        if probs_labels:  # Если есть данные для этого типа отношений
-                            probs, labels = zip(*probs_labels)
-                            preds = torch.tensor([p > 0.5 for p in probs], device=device)
-                            true_labels = torch.tensor(labels, device=device)
-                            rel_correct += (preds == true_labels).sum().item()
-                            rel_total += len(true_labels)
-
-            if batch_idx % 10 == 0:
-                logger.info(
-                    f"Batch {batch_idx}/{len(train_loader)} - "
-                    f"Batch Loss: {loss.item():.4f} - "
-                    f"Avg Loss: {epoch_loss / (batch_idx + 1):.4f} - "
-                    f"NER Acc: {ner_correct / ner_total if ner_total > 0 else 0:.2%} - "
-                    f"Rel Acc: {rel_correct / rel_total if rel_total > 0 else 0:.2%}"
-                )
-
-        # Evaluation metrics
-        ner_acc = ner_correct / ner_total if ner_total > 0 else 0
-        rel_acc = rel_correct / rel_total if rel_total > 0 else 0
-
-        print(f"\nEpoch {epoch+1} Results:")
-        print(f"Loss: {epoch_loss/len(train_loader):.4f}")
-        print(f"NER Accuracy: {ner_acc:.2%} ({ner_correct}/{ner_total})")
-        print(f"Relation Accuracy: {rel_acc:.2%} ({rel_correct}/{rel_total})")
-
-    save_dir = "saved_model"
-    os.makedirs(save_dir, exist_ok=True)
-    tokenizer.save_pretrained(save_dir)
-    model.save_pretrained(save_dir)
-    print(f"Model saved to {save_dir}")
-
+    # Финальное сохранение
+    self._save_model(model, tokenizer, "final_model")
+    print("Model saved!")
     return model, tokenizer
 
 def format_relation(arg1_text, arg2_text, rel_type, confidence):
     conf_str = f"{confidence:.2f}"
-    return f"🔗 {colored(arg1_text, 'white', attrs=['bold'])} --{rel_type}({conf_str})--> {colored(arg2_text, 'white', attrs=['bold'])}"
+    return f"~~~~~~~> {colored(arg1_text, 'black', attrs=['bold'])} --{rel_type}({conf_str})--> {colored(arg2_text, 'black', attrs=['bold'])}"
 
 def visualize_prediction_colored(prediction):
     text = prediction['text']
@@ -845,7 +1062,7 @@ def visualize_prediction_colored(prediction):
         result_text += text[last_pos:ent['start_char']]
 
         # Color entity
-        color = ENTITY_COLORS.get(ent['type'], 'white')
+        color = ENTITY_COLORS.get(ent['type'], 'black')
         entity_str = colored(ent['text'], color, attrs=["bold"])
         result_text += f"[{entity_str}]({ent['type']})"
 
@@ -861,198 +1078,166 @@ def visualize_prediction_colored(prediction):
     return "\n" + "\n".join(rel_lines) + "\n\n" + result_text
 
 
-def predict(text, model, tokenizer, device="cuda", relation_threshold=None):
-    # Tokenize input with offset mapping
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    relation_threshold = {**RELATION_THRESHOLDS, **(relation_threshold or {})}
-    encoding = tokenizer(text, return_tensors="pt", return_offsets_mapping=True, max_length=512,
-        truncation=True)
+class RelationPredictor:
+    def __init__(self, model, tokenizer, device=None):
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = model
+        self.tokenizer = tokenizer
+        self.idx_to_type = {v: k for k, v in ENTITY_TYPES.items()}
+        self.model.to(self.device)
+        self.model.eval()
 
-    input_ids = encoding['input_ids'].to(device)
-    attention_mask = encoding['attention_mask'].to(device)
-    offset_mapping = encoding['offset_mapping'][0].cpu().numpy()
+    def predict(self, text, relation_threshold=None):
+        """Main prediction method"""
+        encoding = self.tokenizer(text, relation_threshold).to(self.device)
+        relation_threshold = {**RELATION_THRESHOLDS, **(relation_threshold or {})}
+        with torch.no_grad():
+            outputs = self.model(encoding['input_ids'], encoding['attention_mask'])
+            entities = self._extract_entities(text, encoding, outputs)
 
-    with torch.no_grad():
-        outputs = model(input_ids, attention_mask)
+            if len(entities) < 2:
+                return {'text': text, 'entities': entities, 'relations': []}
 
-    # Decode NER with CRF
-    mask = attention_mask.bool()
-    ner_preds = model.crf.decode(outputs['ner_logits'], mask=mask)[0]
-    tokens = tokenizer.convert_ids_to_tokens(input_ids[0], skip_special_tokens=True)
+            relations = self._predict_relations(encoding, entities, relation_threshold)
 
-    # Extract entities
-    entities = []
-    current_entity = None
-    entity_id = 0
-
-    for i, (token, pred) in enumerate(zip(tokens, ner_preds)):
-        if token in ['[CLS]', '[SEP]', '[PAD]']:
-            if current_entity:
-                entities.append(current_entity)
-                current_entity = None
-            continue
-
-        # Get the character offsets for this token
-        token_start, token_end = offset_mapping[i]
-
-        # Handle entity extraction
-        if pred % 2 == 1:  # Beginning of entity (B- tag)
-            if current_entity:
-                entities.append(current_entity)
-
-            entity_type = None
-            if pred == 1: entity_type = "PERSON"
-            elif pred == 3: entity_type = "PROFESSION"
-            elif pred == 5: entity_type = "ORGANIZATION"
-            elif pred == 7: entity_type = "FAMILY"
-            elif pred == 9: entity_type = "LOCATION"
-
-            if entity_type:
-                current_entity = {
-                    'id': f"T{entity_id}",
-                    'type': entity_type,
-                    'start': i,
-                    'end': i,
-                    'start_char': token_start,
-                    'end_char': token_end,
-                    'token_ids': [i]
-                }
-                entity_id += 1
-
-        elif pred % 2 == 0 and pred != 0:  # Inside of entity (I- tag)
-            if current_entity:
-                # Check if this continues the current entity
-                expected_type = None
-                if pred == 2: expected_type = "PERSON"
-                elif pred == 4: expected_type = "PROFESSION"
-                elif pred == 6: expected_type = "ORGANIZATION"
-                elif pred == 8: expected_type = "FAMILY"
-                elif pred == 10: expected_type = "LOCATION"
-
-                if expected_type and current_entity['type'] == expected_type:
-                    current_entity['end'] = i
-                    current_entity['end_char'] = token_end
-                    current_entity['token_ids'].append(i)
-                else:
-                    # Type mismatch, save current and start new
-                    entities.append(current_entity)
-                    current_entity = None
-        else:  # O (outside)
-            if current_entity:
-                entities.append(current_entity)
-                current_entity = None
-
-    # Add the last entity if exists
-    if current_entity:
-        entities.append(current_entity)
-
-    # Now get the actual text for each entity
-    for entity in entities:
-        entity['text'] = text[entity['start_char']:entity['end_char']]
-
-    if len(entities) < 2:  # Не может быть отношений, если меньше 2 сущностей
         return {
             'text': text,
             'entities': entities,
-            'relations': []
+            'relations': sorted(relations.values(), key=lambda x: -x['confidence'])
         }
 
-    # Extract relations
-    relations = []
-    entity_map = {e['id']: e for e in entities}
+    def _tokenize(self, text):
+        return self.tokenizer(
+            text,
+            return_tensors="pt",
+            return_offsets_mapping=True,
+            max_length=512,
+            truncation=True
+        ).to(self.device)
 
-    if len(entities) >= 2:
-        sequence_output = model.bert(input_ids, attention_mask).last_hidden_state
+    def _extract_entities(self, text, encoding, outputs):
+        """Extract and normalize entities from model output"""
+        mask = encoding['attention_mask'].bool()
+        preds = self.model.crf.decode(outputs['ner_logits'], mask=mask)[0]
 
-        # Create entity embeddings
-        entity_embeddings = []
+        entities = []
+        current = None
+
+        for i, (token, pred) in enumerate(zip(
+                self.tokenizer.convert_ids_to_tokens(encoding['input_ids'][0]),
+                preds
+        )):
+            if token in ['[CLS]', '[SEP]', '[PAD]']:
+                if current: entities.append(current)
+                current = None
+                continue
+
+            start, end = offset_mapping[i]
+            is_begin = pred % 2 == 1
+            is_inside = pred % 2 == 0 and pred != 0
+
+            if is_begin:
+                if current: entities.append(current)
+                current = {
+                    'id': f"T{len(entities)}",
+                    'type': self.idx_to_type[(pred + 1) // 2],
+                    'start': i, 'end': i,
+                    'start_char': start, 'end_char': end,
+                    'token_ids': [i]
+                }
+            elif is_inside and current:
+                expected_type = self.idx_to_type[pred // 2]
+                if current['type'] == expected_type:
+                    current['end'] = i
+                    current['end_char'] = end
+                    current['token_ids'].append(i)
+                else:
+                    entities.append(current)
+                    current = None
+            elif current:
+                entities.append(current)
+                current = None
+
+        if current: entities.append(current)
+
+        # Add text spans
         for e in entities:
-            # Get all token embeddings for this entity
-            token_embeddings = sequence_output[0, e['token_ids']]
-            # Average them
-            entity_embed = token_embeddings.mean(dim=0)
-            entity_embeddings.append(entity_embed)
+            e['text'] = text[e['start_char']:e['end_char']]
 
-        entity_embeddings = torch.stack(entity_embeddings).to(device)
+        return entities
 
-        # Build complete graph
-        # Применяем GAT слои (как в forward)
-        edge_pairs = [[i, j] for i in range(len(entities)) for j in range(len(entities)) if i != j]
-        edge_index = torch.tensor(edge_pairs).t().to(device)
+    def _predict_relations(self, encoding, entities, thresholds):
+        """Predict relations between extracted entities"""
+        # Get embeddings
+        seq_out = model.bert(encoding['input_ids'], encoding['attention_mask']).last_hidden_state
+        entity_embs = torch.stack([
+            seq_out[0, e['token_ids']].mean(0) for e in entities
+        ])
 
-        x = model.gat1(entity_embeddings, edge_index)
-        x = model.norm1(x)
-        x = F.elu(x)
+        # Apply GAT
+        edge_index = torch.tensor([
+            [i, j] for i in range(len(entities))
+            for j in range(len(entities)) if i != j
+        ]).t().to(device)
+
+        x = model.gat1(entity_embs, edge_index)
+        x = model.norm1(F.elu(x))
         x = model.gat2(x, edge_index)
-        x = model.norm2(x)
-        x = F.elu(x)
+        x = model.norm2(F.elu(x))
 
-        # Предсказываем отношения с единым классификатором
-        relations = []
-        cls_token = sequence_output[:, 0, :].squeeze(0)
+        # Predict relations
+        relations = {}
+        cls_token = seq_out[:, 0, :].squeeze(0)
 
-        for rel_type, rel_type_idx in RELATION_TYPES.items():
-            valid_combinations = VALID_COMB.get(rel_type, [])
+        for rel_type, rel_idx in RELATION_TYPES.items():
+            for i, j in self._get_valid_pairs(entities, rel_type):
+                src, tgt = (j, i) if rel_type == 'FOUNDED_BY' else (i, j)
 
-            for i, e1 in enumerate(entities):
-                for j, e2 in enumerate(entities):
-                    if i != j and (e1['type'], e2['type']) in valid_combinations:
-                        # Для FOUNDED_BY меняем направление
-                        if rel_type == 'FOUNDED_BY':
-                            src, tgt = j, i
-                        else:
-                            src, tgt = i, j
+                logit = model.rel_classifier(torch.cat([
+                    x[src], x[tgt],
+                    model.rel_type_emb(torch.tensor(rel_idx, device=device)),
+                    cls_token
+                ]))
 
-                        rel_type_tensor = model.rel_type_emb(torch.tensor(rel_type_idx, device=device))
-                        pair_vec = torch.cat([x[src], x[tgt], rel_type_tensor, cls_token])
-                        logit = model.rel_classifier(pair_vec)
-                        prob = torch.sigmoid(logit).item()
+                prob = torch.sigmoid(logit).item()
+                if prob > thresholds.get(rel_type, 0.5):
+                    key = (entities[src]['id'], entities[tgt]['id'], rel_type)
+                    if key not in relations or prob > relations[key]['confidence']:
+                        relations[key] = {
+                            'type': rel_type,
+                            'arg1': entities[src],
+                            'arg2': entities[tgt],
+                            'confidence': prob
+                        }
+        return relations
 
-                        if prob > relation_threshold.get(rel_type, 0.5):
-                            relations.append({
-                                'type': rel_type,
-                                'arg1_id': entities[src]['id'],
-                                'arg2_id': entities[tgt]['id'],
-                                'arg1': entities[src],
-                                'arg2': entities[tgt],
-                                'confidence': prob
-                            })
-
-    # Remove duplicates and keep highest confidence
-    unique_relations = {}
-    for rel in relations:
-        key = (rel['arg1_id'], rel['arg2_id'], rel['type'])
-        if key not in unique_relations or rel['confidence'] > unique_relations[key]['confidence']:
-            unique_relations[key] = rel
-
-    # Sort by confidence
-    sorted_relations = sorted(unique_relations.values(),
-                            key=lambda x: x['confidence'], reverse=True)
-
-    return {
-        'text': text,
-        'entities': entities,
-        'relations': sorted_relations
-    }
+    def _get_valid_pairs(self, entities, rel_type):
+        """Filter valid entity pairs for relation type"""
+        valid = []
+        for i, e1 in enumerate(entities):
+            for j, e2 in enumerate(entities):
+                if i != j and (e1['type'], e2['type']) in VALID_COMB.get(rel_type, []):
+                    valid.append((i, j))
+        return valid
 
 if __name__ == "__main__":
-    # model, tokenizer = train_model()
-    # test_texts = [
-    #     "Эмир Катара встретится с членами королевской семьи.Эмир Катара шейх Хамад бен Халиф Аль Тани встретится в понедельник с членами королевской семьи и высокопоставленными чиновниками страны на фоне слухов о том, что он намерен передать власть сыну — наследному принцу шейху Тамиму, передает агентство Рейтер со ссылкой на катарский телеканал 'Аль-Джазира'. 'Аль-Джазира', в свою очередь, ссылается на 'надежный источник в Катаре', но не приводит каких-либо деталей. Ранее в этом месяце в дипломатических кругах появились слухи, что эмир Катара, которому сейчас 61 год, рассматривает возможность передачи власти 33-летнему наследному принцу, отмечает агентство. При этом также предполагается, что в отставку подаст влиятельный премьер-министр и министр иностранных дел Катара шейх Хамад бен Джасем Аль Тани. По данным агентства, дипломаты западных и арабских стран оценивают такое решение как попытку осторожной передачи власти более молодому поколению правителей. Ранее новостной портал 'Элаф' отмечал, что перемены во властных структурах Катара могут произойти уже в конце июня. Согласно информации агентства Франс Пресс, Тамим бен Хамад Аль Тани родился в 1980 году и является вторым сыном эмира и его второй жены Мозы бинт Нассер. Наследный принц занимает офицерский пост в катарской армии, а также является главой Олимпийского комитета страны.",
-    #     "Айрат Мурзагалиев, заместитель начальника управления президента РФ, встретился с главой администрации Уфы.",
-    #     "Иван Петров работает программистом в компании Яндекс.",
-    #     "Доктор Сидоров принял пациентку Ковалеву в городской больнице.",
-    #     "Директор сводного экономического департамента Банка России Надежда Иванова назначена также на должность заместителя председателя ЦБ, сообщил в четверг регулятор.",
-    #     "Дмитрий работает в организации 'ЭкоФарм'",
-    #     "Компания 'Технологии будущего' является частью крупной корпорации, расположенной в Санкт-Петербурге",
-    #     "Анна занимает должность главного врача в больнице 'Здоровье'."
-    # ]
-    #
-    # for text in test_texts:
-    #     print("\n" + "="*80)
-    #     print(f"Processing text: '{text}'")
-    #     result = predict(text, model, tokenizer)
-    #     print(visualize_prediction_colored(result))
+    model, tokenizer = train_model()
+    test_texts = [
+        "Эмир Катара встретится с членами королевской семьи.Эмир Катара шейх Хамад бен Халиф Аль Тани встретится в понедельник с членами королевской семьи и высокопоставленными чиновниками страны на фоне слухов о том, что он намерен передать власть сыну — наследному принцу шейху Тамиму, передает агентство Рейтер со ссылкой на катарский телеканал 'Аль-Джазира'. 'Аль-Джазира', в свою очередь, ссылается на 'надежный источник в Катаре', но не приводит каких-либо деталей. Ранее в этом месяце в дипломатических кругах появились слухи, что эмир Катара, которому сейчас 61 год, рассматривает возможность передачи власти 33-летнему наследному принцу, отмечает агентство. При этом также предполагается, что в отставку подаст влиятельный премьер-министр и министр иностранных дел Катара шейх Хамад бен Джасем Аль Тани. По данным агентства, дипломаты западных и арабских стран оценивают такое решение как попытку осторожной передачи власти более молодому поколению правителей. Ранее новостной портал 'Элаф' отмечал, что перемены во властных структурах Катара могут произойти уже в конце июня. Согласно информации агентства Франс Пресс, Тамим бен Хамад Аль Тани родился в 1980 году и является вторым сыном эмира и его второй жены Мозы бинт Нассер. Наследный принц занимает офицерский пост в катарской армии, а также является главой Олимпийского комитета страны.",
+        "Айрат Мурзагалиев, заместитель начальника управления президента РФ, встретился с главой администрации Уфы.",
+        "Иван Петров работает программистом в компании Яндекс.",
+        "Доктор Сидоров принял пациентку Ковалеву в городской больнице.",
+        "Директор сводного экономического департамента Банка России Надежда Иванова назначена также на должность заместителя председателя ЦБ, сообщил в четверг регулятор.",
+        "Дмитрий работает в организации 'ЭкоФарм'",
+        "Компания 'Технологии будущего' является частью крупной корпорации, расположенной в Санкт-Петербурге",
+        "Анна занимает должность главного врача в больнице 'Здоровье'."
+    ]
+
+    for text in test_texts:
+        print("\n" + "="*80)
+        print(f"Processing text: '{text}'")
+        result = predict(text, model, tokenizer)
+        print(visualize_prediction_colored(result))
 
     # Для загрузки модели
     loaded_model = NERRelationModel.from_pretrained("saved_model", device="cpu")
